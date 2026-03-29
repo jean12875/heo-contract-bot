@@ -1,0 +1,11 @@
+{
+  "name": "heo-contract-bot",
+  "version": "1.0.0",
+  "main": "contract-bot.js",
+  "scripts": {
+    "start": "node contract-bot.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.16.3"
+  }
+}
