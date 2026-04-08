@@ -2,184 +2,212 @@ const {
     Client, 
     GatewayIntentBits, 
     Partials, 
+    PermissionFlagsBits, 
     ActionRowBuilder, 
     ButtonBuilder, 
     ButtonStyle, 
-    ChannelType, 
-    PermissionsBitField, 
     EmbedBuilder, 
     ModalBuilder, 
     TextInputBuilder, 
-    TextInputStyle 
+    TextInputStyle, 
+    ChannelType 
 } = require('discord.js');
 
 const client = new Client({
-    intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
-    partials: [Partials.Channel]
+    intents: [
+        GatewayIntentBits.Guilds,
+        GatewayIntentBits.GuildMessages,
+        GatewayIntentBits.MessageContent,
+        GatewayIntentBits.GuildMembers,
+    ],
+    partials: [Partials.Channel],
 });
 
-// Configuration des IDs
+// --- CONFIGURATION ---
 const CONFIG = {
     TOKEN: process.env.TOKEN, // Variable Railway
-    GUILD_ID: '1485191413355515936',
-    ROLE_OWNER: '1485191413837856966',
-    ROLE_SECRETARY: '1490464910549712937',
-    ROLE_STAFF: '1487848016110162153',
-    CAT_PROPOSITION: '1490697124709404872' // Salon proposition
+    ROLE_OWNER: "1485191413837856966",
+    ROLE_SECRETAIRE: "1490464910549712937",
+    ROLE_STAFF: "1487848016110162153",
+    GUILD_ID: "1485191413355515936"
 };
 
-// Map des étapes pour la fonction Back
-const STEPS = [
-    { emoji: '🟡', label: 'Initialisation' },
-    { emoji: '1️⃣💳', label: 'Attente 1er Paiement' },
-    { emoji: '🛠️', label: 'En Développement' },
-    { emoji: '2️⃣💳', label: 'Attente Paiement Final' },
-    { emoji: '💰', label: 'Paiement Dev' },
-    { emoji: '✅', label: 'Terminé' }
-];
+const contractStates = new Map();
+
+// Configuration des étapes
+const STEPS = {
+    0: { emoji: '🟡', label: 'Initialisation' },
+    1: { emoji: '1️⃣💳', label: 'Attente 1er paiement' },
+    2: { emoji: '🛠️', label: 'Développement' },
+    3: { emoji: '2️⃣💳', label: 'Attente paiement final' },
+    4: { emoji: '💰', label: 'Paiement dév en cours' },
+    5: { emoji: '✅', label: 'Paiement secrétaire' },
+    6: { emoji: '🏁', label: 'Contrat terminé' }
+};
 
 client.once('ready', () => {
-    console.log(`Bot connecté en tant que ${client.user.tag}`);
+    console.log(`✅ HEO Bot prêt sur Railway !`);
 });
 
-// --- 1. CRÉATION DU CONTRAT (MODAL) ---
 client.on('interactionCreate', async interaction => {
-    if (interaction.isChatInputCommand() && interaction.commandName === 'create-contract') {
-        const modal = new ModalBuilder()
-            .setCustomId('modal_contract')
-            .setTitle('Nouveau Contrat HEO');
-
-        const fields = [
-            new TextInputBuilder().setCustomId('name').setLabel("Nom du contrat").setStyle(TextInputStyle.Short).setRequired(true),
-            new TextInputBuilder().setCustomId('budget').setLabel("Budget (€)").setStyle(TextInputStyle.Short).setRequired(true),
-            new TextInputBuilder().setCustomId('delay').setLabel("Délai").setStyle(TextInputStyle.Short).setRequired(true),
-            new TextInputBuilder().setCustomId('desc').setLabel("Description").setStyle(TextInputStyle.Paragraph).setRequired(true)
-        ];
-
-        modal.addComponents(fields.map(f => new ActionRowBuilder().addComponents(f)));
-        await interaction.showModal(modal);
+    // 1. CRÉATION DU CONTRAT (MODAL)
+    if (interaction.isChatInputCommand() && interaction.commandName === 'contrat') {
+        const modal = new ModalBuilder().setCustomId('modal_create').setTitle('📋 Nouveau Contrat');
+        modal.addComponents(
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('name').setLabel("Nom du contrat").setStyle(TextInputStyle.Short).setRequired(true)),
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('budget').setLabel("Budget (€)").setStyle(TextInputStyle.Short).setRequired(true)),
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('deadline').setLabel("Délai").setStyle(TextInputStyle.Short).setRequired(true)),
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('desc').setLabel("Description").setStyle(TextInputStyle.Paragraph).setRequired(true))
+        );
+        return await interaction.showModal(modal);
     }
 
-    if (interaction.isModalSubmit() && interaction.customId === 'modal_contract') {
+    // GESTION DU SUBMIT MODAL CRÉATION
+    if (interaction.isModalSubmit() && interaction.customId === 'modal_create') {
         const name = interaction.fields.getTextInputValue('name');
         const budget = interaction.fields.getTextInputValue('budget');
-        const delay = interaction.fields.getTextInputValue('delay');
-        
-        const guild = interaction.guild;
 
-        // Création Catégorie
-        const category = await guild.channels.create({
+        const category = await interaction.guild.channels.create({
             name: `🟡-${name}`,
             type: ChannelType.GuildCategory,
         });
 
-        // Ticket Client
-        const clientTicket = await guild.channels.create({
+        const ticketClient = await interaction.guild.channels.create({
             name: `💼-client`,
             type: ChannelType.GuildText,
             parent: category.id,
             permissionOverwrites: [
-                { id: guild.id, deny: [PermissionsBitField.Flags.ViewChannel] },
-                { id: interaction.user.id, allow: [PermissionsBitField.Flags.ViewChannel] },
-                { id: CONFIG.ROLE_SECRETARY, allow: [PermissionsBitField.Flags.ViewChannel] },
-                { id: CONFIG.ROLE_OWNER, allow: [PermissionsBitField.Flags.ViewChannel] },
-                { id: CONFIG.ROLE_STAFF, allow: [PermissionsBitField.Flags.ViewChannel] },
-            ]
+                { id: interaction.guild.id, deny: [PermissionFlagsBits.ViewChannel] },
+                { id: interaction.user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages] },
+                { id: CONFIG.ROLE_SECRETAIRE, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages] },
+                { id: CONFIG.ROLE_OWNER, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages] },
+                { id: CONFIG.ROLE_STAFF, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages] },
+            ],
         });
 
-        const welcomeEmbed = new EmbedBuilder()
-            .setTitle('🛡️ Sécurité HEO')
-            .setDescription(`Bienvenue. Un secrétaire va s'occuper de vous.\n\n**ATTENTION :** Un secrétaire ne demandera jamais de paiement direct. Tout passe par le PayPal officiel ou le groupe HEO. En cas de comportement suspect, pinge <@&${CONFIG.ROLE_STAFF}>.`)
-            .setColor('Red');
+        const embed = new EmbedBuilder()
+            .setTitle(`💼 Contrat : ${name}`)
+            .setColor('#f1c40f')
+            .setDescription(`**SÉCURITÉ :** Tout paiement doit passer par le compte officiel HEO.\nEn cas de doute : @🚨 • Urgence`)
+            .addFields({ name: 'Budget', value: `${budget}€`, inline: true });
 
         const row = new ActionRowBuilder().addComponents(
-            new ButtonBuilder().setCustomId('step_choose_dev').setLabel('Choisir Dev').setStyle(ButtonStyle.Primary),
-            new ButtonBuilder().setCustomId('contract_back').setLabel('🔙').setStyle(ButtonStyle.Secondary),
-            new ButtonBuilder().setCustomId('contract_cancel').setLabel('🛑 Annuler').setStyle(ButtonStyle.Danger)
+            new ButtonBuilder().setCustomId('btn_next').setLabel('Étape Suivante ➡️').setStyle(ButtonStyle.Success),
+            new ButtonBuilder().setCustomId('btn_back').setLabel('🔙').setStyle(ButtonStyle.Secondary),
+            new ButtonBuilder().setCustomId('btn_cancel').setLabel('🛑 Annuler').setStyle(ButtonStyle.Danger)
         );
 
-        await clientTicket.send({ content: `Client: ${interaction.user} | Staff: <@&${CONFIG.ROLE_SECRETARY}>`, embeds: [welcomeEmbed], components: [row] });
-        await interaction.reply({ content: `Contrat créé : ${category.name}`, ephemeral: true });
-    }
-
-    // --- 3. CHOIX DU DEV (MODAL) ---
-    if (interaction.isButton() && interaction.customId === 'step_choose_dev') {
-        const modal = new ModalBuilder().setCustomId('modal_dev').setTitle('Assigner un Développeur');
-        const devInput = new TextInputBuilder().setCustomId('dev_id').setLabel("ID ou Mention du Dev").setStyle(TextInputStyle.Short).setPlaceholder("@exemple").setRequired(true);
-        const infoInput = new TextInputBuilder().setCustomId('extra_info').setLabel("Infos supplémentaires").setStyle(TextInputStyle.Paragraph).setRequired(false);
+        await ticketClient.send({ content: `<@&${CONFIG.ROLE_SECRETAIRE}>`, embeds: [embed], components: [row] });
         
-        modal.addComponents(new ActionRowBuilder().addComponents(devInput), new ActionRowBuilder().addComponents(infoInput));
-        await interaction.showModal(modal);
+        contractStates.set(category.id, { 
+            step: 0, history: [], originalName: name, clientId: interaction.user.id,
+            ticketClient: ticketClient.id, ticketDev: null, isCancelled: false 
+        });
+
+        await interaction.reply({ content: `✅ Contrat initialisé : ${ticketClient}`, ephemeral: true });
     }
 
+    // 2. LOGIQUE DES BOUTONS ET COMMANDES /NEXT /BACK
+    const category = interaction.channel?.parent;
+    if (!category) return;
+    const state = contractStates.get(category.id);
+    if (!state) return;
+
+    const isNext = interaction.customId === 'btn_next' || (interaction.isChatInputCommand() && interaction.commandName === 'next');
+    const isBack = interaction.customId === 'btn_back' || (interaction.isChatInputCommand() && interaction.commandName === 'back');
+    const isCancel = interaction.customId === 'btn_cancel';
+
+    if (isNext) {
+        if (state.step === 0) { // Demander le Dev
+            const modalDev = new ModalBuilder().setCustomId('modal_dev').setTitle('Assigner le Développeur');
+            modalDev.addComponents(
+                new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('dev_tags').setLabel("Tags Dev (ex: @user1, @user2)").setStyle(TextInputStyle.Short).setRequired(true)),
+                new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('infos').setLabel("Infos additionnelles").setStyle(TextInputStyle.Paragraph))
+            );
+            return await interaction.showModal(modalDev);
+        }
+        state.history.push(state.step);
+        state.step++;
+        await handleTransition(category, state, interaction);
+    }
+
+    if (isBack) {
+        if (state.history.length === 0) return interaction.reply({ content: "Retour impossible.", ephemeral: true });
+        state.step = state.history.pop();
+        await handleTransition(category, state, interaction, true);
+    }
+
+    if (isCancel) {
+        state.isCancelled = !state.isCancelled;
+        const prefix = state.isCancelled ? "🛑" : STEPS[state.step].emoji;
+        await category.setName(`${prefix}-${state.originalName}`);
+        await interaction.reply({ content: state.isCancelled ? "🛑 Contrat annulé." : "✅ Contrat repris.", ephemeral: true });
+    }
+
+    // MODAL ASSIGNATION DEV
     if (interaction.isModalSubmit() && interaction.customId === 'modal_dev') {
-        const devId = interaction.fields.getTextInputValue('dev_id').replace(/[<@!>]/g, '');
-        const category = interaction.channel.parent;
-
-        // Création Ticket Dev
-        const devTicket = await interaction.guild.channels.create({
-            name: `🛠-dev-discussion`,
+        state.history.push(state.step);
+        state.step = 1;
+        const devTags = interaction.fields.getTextInputValue('dev_tags');
+        
+        const ticketDev = await interaction.guild.channels.create({
+            name: `🛠-dev`,
             parent: category.id,
+            type: ChannelType.GuildText,
             permissionOverwrites: [
-                { id: interaction.guild.id, deny: [PermissionsBitField.Flags.ViewChannel] },
-                { id: CONFIG.ROLE_SECRETARY, allow: [PermissionsBitField.Flags.ViewChannel] },
-                { id: devId, allow: [PermissionsBitField.Flags.ViewChannel] },
+                { id: interaction.guild.id, deny: [PermissionFlagsBits.ViewChannel] },
+                { id: CONFIG.ROLE_SECRETAIRE, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages] },
+                { id: CONFIG.ROLE_OWNER, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages] },
             ]
         });
-
-        await category.setName(category.name.replace('🟡', '1️⃣💳'));
-        await interaction.channel.send("✅ Développeur choisi. En attente du premier paiement.");
-        await devTicket.send(`Ticket Dev créé. En attente du premier paiement du client.`);
+        state.ticketDev = ticketDev.id;
         
-        // Mise à jour des boutons du ticket client
-        const row = new ActionRowBuilder().addComponents(
-            new ButtonBuilder().setCustomId('step_paid_1').setLabel('1er Paiement Reçu').setStyle(ButtonStyle.Success),
-            new ButtonBuilder().setCustomId('contract_back').setLabel('🔙').setStyle(ButtonStyle.Secondary)
-        );
-        await interaction.reply({ content: "Ticket Dev créé !", ephemeral: true });
-        await interaction.channel.send({ content: "Action suivante :", components: [row] });
-    }
-
-    // --- 4 & 5. LOGIQUE DES ÉTAPES (SUIVANT / RETOUR / ANNULER) ---
-    if (interaction.isButton()) {
-        const category = interaction.channel.parent;
-        
-        // BOUTON ANNULER
-        if (interaction.customId === 'contract_cancel') {
-            await category.setName(`🛑-${category.name.split('-')[1]}`);
-            return interaction.reply("Contrat annulé 🛑");
-        }
-
-        // BOUTON PREMIER PAIEMENT -> DÉV
-        if (interaction.customId === 'step_paid_1') {
-            await category.setName(category.name.replace('1️⃣💳', '🛠️'));
-            const row = new ActionRowBuilder().addComponents(
-                new ButtonBuilder().setCustomId('step_work_done').setLabel('Travail Terminé').setStyle(ButtonStyle.Primary)
-            );
-            await interaction.reply({ content: "🛠️ Premier paiement reçu, le dev peut commencer.", components: [row] });
-        }
-
-        // BOUTON TRAVAIL FINI -> PAIEMENT 2
-        if (interaction.customId === 'step_work_done') {
-            await category.setName(category.name.replace('🛠️', '2️⃣💳'));
-            const row = new ActionRowBuilder().addComponents(
-                new ButtonBuilder().setCustomId('step_paid_final').setLabel('Paiement Final Reçu').setStyle(ButtonStyle.Success)
-            );
-            await interaction.reply({ content: "💰 Travail fini ! En attente du paiement final.", components: [row] });
-        }
-
-        // PAIEMENT FINAL -> PAYER LE DEV
-        if (interaction.customId === 'step_paid_final') {
-            await category.setName(category.name.replace('2️⃣💳', '💰'));
-            await interaction.channel.setName(`✅-${interaction.channel.name}`);
-            await interaction.reply(`✅ Paiement final reçu. <@&${CONFIG.ROLE_OWNER}> merci de payer le développeur.`);
-            
-            const row = new ActionRowBuilder().addComponents(
-                new ButtonBuilder().setCustomId('step_dev_paid').setLabel('Dev Payé').setStyle(ButtonStyle.Primary)
-            );
-            await interaction.channel.send({ components: [row] });
-        }
+        await handleTransition(category, state, interaction);
+        await ticketDev.send(`**Nouveau Contrat Dev**\nDéveloppeurs : ${devTags}\n\n*Attente du premier paiement...*`);
+        await interaction.channel.send(`🛠️ Développeur choisi. Un message a été envoyé dans le salon client.`);
     }
 });
+
+// FONCTION DE TRANSITION (Gère les changements d'emojis et salons)
+async function handleTransition(category, state, interaction, isBack = false) {
+    const stepInfo = STEPS[state.step];
+    await category.setName(`${stepInfo.emoji}-${state.originalName}`);
+    
+    const clientChan = category.guild.channels.cache.get(state.ticketClient);
+    const devChan = category.guild.channels.cache.get(state.ticketDev);
+
+    switch(state.step) {
+        case 1: // Attente 1er paiement
+            [clientChan, devChan].forEach(c => c?.send("⏳ Attente du premier paiement..."));
+            break;
+        case 2: // Début Travail
+            [clientChan, devChan].forEach(c => c?.send("🛠️ Premier paiement effectué ! Le travail commence."));
+            break;
+        case 3: // Attente Paiement Final
+            await category.setName(`2️⃣💳-${state.originalName}`);
+            [clientChan, devChan].forEach(c => c?.send("💳 Travail terminé. Attente du paiement final."));
+            break;
+        case 4: // Payement Dev (Owner ping)
+            await clientChan?.setName(`✅-${clientChan.name}`);
+            clientChan?.send("✅ Deuxième paiement effectué.");
+            devChan?.send(`<@&${CONFIG.ROLE_OWNER}> : Merci de payer le développeur.`);
+            break;
+        case 5: // Payement Secrétaire
+            if (devChan) {
+                await devChan.setName(`✅-${devChan.name}`);
+                // On retire le dev du salon selon ton souhait
+                // logic: remove dev permissions here
+            }
+            const secTicket = await category.guild.channels.create({
+                name: `📍💳-paiement-secrétaire`,
+                parent: category.id,
+                type: ChannelType.GuildText
+            });
+            secTicket.send(`<@&${CONFIG.ROLE_OWNER}> : Attente du paiement du secrétaire.`);
+            break;
+    }
+
+    if (!interaction.replied) await interaction.reply({ content: `Passage à l'étape : ${stepInfo.label}`, ephemeral: true });
+}
 
 client.login(CONFIG.TOKEN);
