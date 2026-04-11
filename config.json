@@ -1,31 +1,27 @@
 {
-  "token": "entre le token du bot ici ",
-  "clientId": "le client id du bot retrouvable via le oauth2 du bot",
-  "guildId": "id du serveur discord ceci est important pour pouvoir enregistrer les commands du bot de maniere quasiment instantané",
-
-  "lis ceci puis delete cette ligne": "ne pas changer le thumbnail il s'agit de l'icon du serveur discord j'ai pu la mettre ici",
-  "thumbnail": "https://cdn.discordapp.com/icons/1485191413355515936/97d35212d29508dc665d0299ea087fca.png?size=256", 
-
+  "token": "",
+  "clientId": "",
+  "guildId": "",
+  "thumbnail": "https://cdn.discordapp.com/icons/1485191413355515936/97d35212d29508dc665d0299ea087fca.png?size=256",
   "channels": {
-    "contrat": "Le salon ou le pannel pour faire des contrats va être envoyer, mets id ici et pas le nom du salon",
-    "recrutement": "Le salon ou le pannel pour faire des recrutements va être envoyer, mets id ici et pas le nom du salon",
-    "ticket": "Le salon ou le pannel pour faire des tickets hors contrat et recutement comme question etc va etre envoyer, mets id ici et pas le nom du salon",
-    "logs": "Le salon ou les transcript des tickets va etre envoyer, mets id ici et pas le nom du salon, les transcript sont envoyer dans deux endroits 1 en mp à la personne ayant fait le ticket et en second point le salon que tu t'appretes à definir"
+    "contrat": "1490697124709404872",
+    "recrutement": "",
+    "ticket": "1492437836476186814",
+    "logs": "1492438815070093342"
   },
   "categories": {
-    "recrutement": "il s'agit de la categorie ou les salons de recrutements vont être créer, mets id ici et pas le nom de la categorie",
-    "ticket": "il s'agit de la categorie ou les salons de tickets vont être créer, mets id ici et pas le nom de la categorie"
+    "recrutement": "",
+    "ticket": "1485236440047554640"
   },
   "roles": {
-    "gestionTicket": "il s'agit du role qui a accès à tous les tickets et qui peut faire des actions dessus, mets id ici et pas le nom du role",
-    "accesVocEntretien": "il s'agit du role qui a accès au vocal des entretiens de recrutement, mets id ici et pas le nom du role",
-    "secretaire": "il s'agit du role secretaire qui a accès à certains tickets dont les tickets contrat pour negocier ou autre, mets id ici et pas le nom du role",
-    "owner": "owner id role",
-    "urgence": "urgence id role",
-    "admin": "admin id role"
+    "gestionTicket": "1487848016110162153",
+    "accesVocEntretien": "",
+    "secretaire": "1490464910549712937",
+    "owner": "1485191413837856966",
+    "urgence": "1489736017576591481",
+    "admin": ""
   },
   "roleNames": {
-    "urgence": "Urgence",
-    "lis puis delete cette ligne": "ne pas changer le nom du role urgence il est utilisé pour les notifications d'urgence concernant les contrats",
+    "urgence": "Urgence"
   }
 }
