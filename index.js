@@ -33,6 +33,8 @@ const CONFIG = {
     TERMINE:       '1487848579488813309',
     ANNULE:        '1487859413627834418',
     DEV_CONTRAT:   '1495687556728225792',
+    DEV_TERMINE:   '1495698716160692274',
+    DEV_ANNULE:    '1495698949850271765',
   },
 
   ETAPES: [
@@ -130,6 +132,23 @@ function buildStaffRow(etapeIndex, annule = false) {
     new ButtonBuilder().setCustomId('annuler_contrat').setLabel('🚫 Annuler').setStyle(ButtonStyle.Danger),
     new ButtonBuilder().setCustomId('supprimer_ticket').setLabel('🗑️ Supprimer').setStyle(ButtonStyle.Secondary),
   );
+}
+
+// Bouton de suppression du salon dev uniquement
+function buildDevDeleteRow() {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('supprimer_dev').setLabel('🗑️ Supprimer ce salon dev').setStyle(ButtonStyle.Danger),
+  );
+}
+
+// Récupère le salon dev associé à un contrat
+async function getDevChannel(guild, info) {
+  if (!info?.devChannelId) return null;
+  try {
+    return await guild.channels.fetch(info.devChannelId);
+  } catch {
+    return null;
+  }
 }
 
 // ─── READY ────────────────────────────────────────────────────────────────────
@@ -249,11 +268,28 @@ client.on('interactionCreate', async (interaction) => {
 
     const numStr       = padNum(info.num);
     const devChannelName = `dev-${numStr}`;
-    let devChannel = guild.channels.cache.find(c =>
-      c.name === devChannelName && c.parentId === CONFIG.CATEGORIES.DEV_CONTRAT
-    );
+
+    // Cherche d'abord via l'ID stocké, puis par nom en fallback
+    let devChannel = null;
+    if (info.devChannelId) {
+      try {
+        devChannel = await guild.channels.fetch(info.devChannelId);
+      } catch {
+        // Le salon a été supprimé, on en recrée un
+        devChannel = null;
+        info.devChannelId = null;
+      }
+    }
+
+    // Fallback : cherche par nom si pas d'ID stocké
+    if (!devChannel) {
+      devChannel = guild.channels.cache.find(c =>
+        c.name === devChannelName && c.parentId === CONFIG.CATEGORIES.DEV_CONTRAT
+      ) || null;
+    }
 
     if (devChannel) {
+      // Mise à jour des permissions
       for (const [id] of devChannel.permissionOverwrites.cache) {
         await devChannel.permissionOverwrites.delete(id).catch(() => {});
       }
@@ -273,7 +309,13 @@ client.on('interactionCreate', async (interaction) => {
           .addFields({ name: '🔨 Devs', value: devUsers.map(u => `<@${u.id}>`).join('\n') || '*Aucun*' })
           .setFooter({ text: 'HEO Studio • Dev' })
           .setTimestamp()],
+        components: [buildDevDeleteRow()],
       });
+
+      // Sauvegarde l'ID du salon dev
+      info.devChannelId = devChannel.id;
+      saveTickets();
+
       await interaction.editReply({ content: `✅ Salon ${devChannel} mis à jour avec ${devUsers.length} dev(s).` });
     } else {
       devChannel = await guild.channels.create({
@@ -305,7 +347,13 @@ client.on('interactionCreate', async (interaction) => {
           )
           .setFooter({ text: 'HEO Studio • Dev' })
           .setTimestamp()],
+        components: [buildDevDeleteRow()],
       });
+
+      // Sauvegarde l'ID du salon dev
+      info.devChannelId = devChannel.id;
+      saveTickets();
+
       await interaction.editReply({ content: `✅ Salon ${devChannel} créé pour le contrat #${numStr} avec ${devUsers.length} dev(s).` });
     }
     return;
@@ -402,6 +450,21 @@ client.on('interactionCreate', async (interaction) => {
     const info = ticketInfos.get(channel.id);
     info.etapeIndex = nouvelleEtape;
     saveTickets();
+
+    // Si on passe à TERMINE, déplacer le salon dev dans la catégorie archive terminé
+    if (CONFIG.ETAPES[nouvelleEtape].id === 'TERMINE') {
+      const devChannel = await getDevChannel(interaction.guild, info);
+      if (devChannel) {
+        await devChannel.setParent(CONFIG.CATEGORIES.DEV_TERMINE, { lockPermissions: false }).catch(() => {});
+        await devChannel.send({
+          embeds: [new EmbedBuilder()
+            .setColor(0x57F287)
+            .setDescription(`✅ Contrat **#${padNum(info.num)} — ${info.nom}** marqué comme **terminé** par <@${interaction.user.id}>`)
+            .setTimestamp()],
+        });
+      }
+    }
+
     const clientUser = await client.users.fetch(info.clientId);
     await interaction.message.edit({ embeds: [buildEmbed(info.num, info.nom, info.description, info.budget, info.delai, clientUser, nouvelleEtape)], components: [buildStaffRow(nouvelleEtape)] });
     return;
@@ -439,6 +502,19 @@ client.on('interactionCreate', async (interaction) => {
     }
     await channel.setParent(CONFIG.CATEGORIES.ANNULE, { lockPermissions: false });
     ticketEtapes.set(channel.id, -1);
+
+    // Déplacer le salon dev dans la catégorie archive annulé
+    const devChannel = await getDevChannel(interaction.guild, info);
+    if (devChannel) {
+      await devChannel.setParent(CONFIG.CATEGORIES.DEV_ANNULE, { lockPermissions: false }).catch(() => {});
+      await devChannel.send({
+        embeds: [new EmbedBuilder()
+          .setColor(0xED4245)
+          .setDescription(`❌ Contrat **#${padNum(info.num)} — ${info.nom}** **annulé** par <@${interaction.user.id}>`)
+          .setTimestamp()],
+      });
+    }
+
     const updatedEmbed = EmbedBuilder.from(interaction.message.embeds[0])
       .setColor(0xED4245)
       .setFooter({ text: 'HEO Studio • ❌ Contrat annulé' });
@@ -472,13 +548,13 @@ client.on('interactionCreate', async (interaction) => {
     return;
   }
 
-  // ── Supprimer ticket ──────────────────────────────────────────────────────────
+  // ── Supprimer ticket (contrat + dev) ──────────────────────────────────────────
   if (interaction.isButton() && interaction.customId === 'supprimer_ticket') {
     if (!isStaffOrAdmin(interaction.member)) {
       await interaction.reply({ content: '❌ Réservé au staff.', ephemeral: true }); return;
     }
     await interaction.reply({
-      content: '⚠️ Tu es sûr de vouloir **supprimer définitivement** ce ticket ?',
+      content: '⚠️ Tu es sûr de vouloir **supprimer définitivement** ce ticket ?\n> Le salon dev associé sera également supprimé.',
       components: [new ActionRowBuilder().addComponents(
         new ButtonBuilder().setCustomId('confirmer_suppression').setLabel('✅ Oui, supprimer').setStyle(ButtonStyle.Danger),
         new ButtonBuilder().setCustomId('annuler_suppression').setLabel('❌ Annuler').setStyle(ButtonStyle.Secondary),
@@ -490,6 +566,14 @@ client.on('interactionCreate', async (interaction) => {
 
   if (interaction.isButton() && interaction.customId === 'confirmer_suppression') {
     const channel = interaction.channel;
+    const info    = ticketInfos.get(channel.id);
+
+    // Supprimer le salon dev associé s'il existe
+    const devChannel = await getDevChannel(interaction.guild, info);
+    if (devChannel) {
+      await devChannel.delete().catch(() => {});
+    }
+
     ticketEtapes.delete(channel.id);
     ticketInfos.delete(channel.id);
     saveTickets();
@@ -500,6 +584,43 @@ client.on('interactionCreate', async (interaction) => {
 
   if (interaction.isButton() && interaction.customId === 'annuler_suppression') {
     await interaction.reply({ content: '✅ Suppression annulée.', ephemeral: true }); return;
+  }
+
+  // ── Supprimer salon dev uniquement ────────────────────────────────────────────
+  if (interaction.isButton() && interaction.customId === 'supprimer_dev') {
+    if (!isStaffOrAdmin(interaction.member)) {
+      await interaction.reply({ content: '❌ Réservé au staff.', ephemeral: true }); return;
+    }
+    await interaction.reply({
+      content: '⚠️ Tu es sûr de vouloir **supprimer ce salon dev** ?\n> Le contrat associé ne sera **pas** supprimé. Tu pourras réutiliser `/assign` pour en recréer un.',
+      components: [new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('confirmer_suppression_dev').setLabel('✅ Oui, supprimer').setStyle(ButtonStyle.Danger),
+        new ButtonBuilder().setCustomId('annuler_suppression_dev').setLabel('❌ Annuler').setStyle(ButtonStyle.Secondary),
+      )],
+      ephemeral: true,
+    });
+    return;
+  }
+
+  if (interaction.isButton() && interaction.customId === 'annuler_suppression_dev') {
+    await interaction.reply({ content: '✅ Suppression annulée.', ephemeral: true }); return;
+  }
+
+  if (interaction.isButton() && interaction.customId === 'confirmer_suppression_dev') {
+    const devChannel = interaction.channel;
+
+    // Trouver le contrat associé à ce salon dev et retirer le devChannelId
+    for (const [contratChannelId, info] of ticketInfos.entries()) {
+      if (info.devChannelId === devChannel.id) {
+        info.devChannelId = null;
+        saveTickets();
+        break;
+      }
+    }
+
+    await interaction.reply({ content: '🗑️ Suppression du salon dev en cours...', ephemeral: true });
+    setTimeout(() => devChannel.delete().catch(() => {}), 2000);
+    return;
   }
 
 });
