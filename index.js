@@ -151,6 +151,16 @@ async function getDevChannel(guild, info) {
   }
 }
 
+// Récupère le message embed du contrat
+async function getContractMessage(channel, info) {
+  if (!info?.messageId) return null;
+  try {
+    return await channel.messages.fetch(info.messageId);
+  } catch {
+    return null;
+  }
+}
+
 // ─── READY ────────────────────────────────────────────────────────────────────
 client.once('ready', async () => {
   console.log(`✅ Connecté en tant que ${client.user.tag}`);
@@ -397,13 +407,15 @@ client.on('interactionCreate', async (interaction) => {
 
     ticketEtapes.set(ticketChannel.id, 0);
     ticketInfos.set(ticketChannel.id, { num, nom: nomProjet, description, budget, delai, clientId: user.id, etapeIndex: 0 });
-    saveTickets();
 
-    await ticketChannel.send({
+    const contractMsg = await ticketChannel.send({
       content: `👋 <@${user.id}> | <@&${CONFIG.SECRETAIRE_ROLE_ID}>`,
       embeds: [buildEmbed(num, nomProjet, description, budget, delai, user, 0)],
       components: [buildStaffRow(0)],
     });
+
+    ticketInfos.get(ticketChannel.id).messageId = contractMsg.id;
+    saveTickets();
 
     await ticketChannel.send({ content: CONFIG.SECURITY_MESSAGE });
 
@@ -514,10 +526,22 @@ client.on('interactionCreate', async (interaction) => {
       });
     }
 
-    const updatedEmbed = EmbedBuilder.from(interaction.message.embeds[0])
+    const updatedEmbed = new EmbedBuilder()
+      .setTitle(`📋 Contrat #${padNum(info.num)} — ${info.nom}`)
       .setColor(0xED4245)
-      .setFooter({ text: 'HEO Studio • ❌ Contrat annulé' });
-    await interaction.message.edit({ embeds: [updatedEmbed], components: [buildStaffRow(0, true)] });
+      .addFields(
+        { name: '👤 Client', value: `<@${info.clientId}>`, inline: true },
+        { name: '💰 Budget', value: info.budget,            inline: true },
+        { name: '⏱️ Délai',  value: info.delai,             inline: true },
+        { name: '📝 Description', value: info.description,  inline: false },
+      )
+      .setFooter({ text: 'HEO Studio • ❌ Contrat annulé' })
+      .setTimestamp();
+
+    const contractMsg = await getContractMessage(channel, info);
+    if (contractMsg) {
+      await contractMsg.edit({ embeds: [updatedEmbed], components: [buildStaffRow(0, true)] });
+    }
     await channel.send({ embeds: [new EmbedBuilder().setColor(0xED4245).setDescription(`❌ Contrat **annulé** par <@${interaction.user.id}>`)] });
     return;
   }
