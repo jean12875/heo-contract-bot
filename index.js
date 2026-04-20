@@ -3,6 +3,7 @@ const {
   EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle,
   ModalBuilder, TextInputBuilder, TextInputStyle,
   REST, Routes, SlashCommandBuilder,
+  StringSelectMenuBuilder, StringSelectMenuOptionBuilder,
 } = require('discord.js');
 const fs = require('fs');
 
@@ -46,6 +47,29 @@ const CONFIG = {
   ],
 
   SECURITY_MESSAGE: `⚠️ **Message de sécurité automatique**\nAucun secrétaire ne vous demandera jamais de le payer directement. Tous les paiements passent exclusivement par le compte Revolut officiel HEO : https://revolut.me/heostudio ou le groupe officiel HEO : https://www.roblox.com/fr/games/119523597803809/Hospital-Escape-Obby.\nSi un secrétaire tente de faire autrement ou si vous observez un comportement suspect, utilisez immédiatement le ping <@&1489736017576591481>.`,
+
+  // ─── RECRUTEMENT ────────────────────────────────────────────────────────────
+  RECRUTEMENT_PANEL_CHANNEL_ID: '1495708866099417158',
+  RECRUTEMENT_CATEGORY_ID:      '1488554531217346731',
+  RECRUTEMENT_TERMINE_ID:       '1490254722899116273',
+  RECRUTEMENT_REFUSE_ID:        '1490746206828232935',
+  ROLE_ATT_ENTRETIEN:           '1485313117603893348',
+  ROLE_DEV_GLOBAL:              '1485191413829337299',
+  ROLE_SEPARATION:              '1485191413829337293',
+
+  DEV_ROLES: {
+    builder:   '1488194780809789511',
+    ui:        '1488194616413913088',
+    scripteur: '1488194696831307776',
+    animateur: '1488581098563702914',
+  },
+
+  ETOILES_ROLES: {
+    ui:        ['1485321773665751141','1485321825834766587','1485321711158038841','1485321660138524763','1485320858624065757'],
+    builder:   ['1485322061994786918','1485321763985293392','1485321427845648385','1485321015721591024','1485320049073061952'],
+    animateur: ['1488587193932058654','1488587312269885590','1488587339105308752','1488587372319871197','1488587400518041612'],
+    scripteur: ['1485321122646851735','1485321178859180165','1485321077495300298','1485321012709953717','1488194696831307776'],
+  },
 };
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -80,13 +104,21 @@ function saveTickets() {
 let contractCounter = loadCounter();
 
 // ─── STATE ────────────────────────────────────────────────────────────────────
-const ticketEtapes = new Map();
-const ticketInfos  = loadTickets();
+const ticketEtapes       = new Map();
+const ticketInfos        = loadTickets();
+const pendingRecrutement = new Map();
 
 for (const [channelId, info] of ticketInfos.entries()) {
   ticketEtapes.set(channelId, info.etapeIndex ?? 0);
 }
 // ──────────────────────────────────────────────────────────────────────────────
+
+const DEV_TYPE_ICONS = {
+  builder:   '🏗️ Builder',
+  scripteur: '💻 Scripteur',
+  ui:        '🎨 UI',
+  animateur: '💨 Animateur',
+};
 
 function padNum(n) {
   return String(n).padStart(4, '0');
@@ -212,7 +244,23 @@ if (process.argv[2] === 'setup') {
         new ButtonBuilder().setCustomId('creer_contrat').setLabel('📝 Créer un contrat').setStyle(ButtonStyle.Primary)
       )],
     });
-    console.log('✅ Panneau envoyé !');
+
+    const recrutCh = await client.channels.fetch(CONFIG.RECRUTEMENT_PANEL_CHANNEL_ID);
+    await recrutCh.send({
+      embeds: [new EmbedBuilder()
+        .setTitle('🖥️ HEO Studio — Recrutement Dev')
+        .setDescription(
+          'Tu souhaites rejoindre l\'équipe de développement **HEO Studio** ?\n\n' +
+          'Clique sur le bouton ci-dessous pour ouvrir ta candidature.\nUn salon privé sera créé pour toi et notre équipe.'
+        )
+        .setColor(0x5865F2)
+        .setFooter({ text: 'HEO Studio • Recrutement' })],
+      components: [new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('creer_recrutement').setLabel('📩 Postuler').setStyle(ButtonStyle.Primary)
+      )],
+    });
+
+    console.log('✅ Panneaux envoyés !');
     process.exit(0);
   });
 }
@@ -656,6 +704,329 @@ client.on('interactionCreate', async (interaction) => {
 
     await interaction.reply({ content: '🗑️ Suppression du salon dev en cours...', ephemeral: true });
     setTimeout(() => devChannel.delete().catch(() => {}), 2000);
+    return;
+  }
+
+  // ════════════════════════════════════════════════════════════════════════════
+  // ─── RECRUTEMENT DEV ────────────────────────────────────────────────────────
+  // ════════════════════════════════════════════════════════════════════════════
+
+  // ── Ouvrir candidature ────────────────────────────────────────────────────────
+  if (interaction.isButton() && interaction.customId === 'creer_recrutement') {
+    const modal = new ModalBuilder()
+      .setCustomId('modal_recrutement')
+      .setTitle('📩 Candidature Dev — HEO Studio');
+    modal.addComponents(
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder().setCustomId('type_dev').setLabel('Type de développeur').setStyle(TextInputStyle.Short).setPlaceholder('Ex: UI, Scripting, Builder, Animation (ou plusieurs)').setRequired(true)
+      ),
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder().setCustomId('disponibilite').setLabel('Disponibilité (jours / horaires)').setStyle(TextInputStyle.Short).setPlaceholder('Ex: Lun-Ven 18h-22h, Week-end toute la journée...').setRequired(true)
+      ),
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder().setCustomId('paiement').setLabel('Type de paiement souhaité').setStyle(TextInputStyle.Short).setPlaceholder('Ex: Robux, €, % sur projet...').setRequired(true)
+      ),
+    );
+    await interaction.showModal(modal);
+    return;
+  }
+
+  // ── Modal recrutement soumis ──────────────────────────────────────────────────
+  if (interaction.isModalSubmit() && interaction.customId === 'modal_recrutement') {
+    await interaction.deferReply({ ephemeral: true });
+    const typeDev       = interaction.fields.getTextInputValue('type_dev');
+    const disponibilite = interaction.fields.getTextInputValue('disponibilite');
+    const paiement      = interaction.fields.getTextInputValue('paiement');
+    const user          = interaction.user;
+    const guild         = interaction.guild;
+
+    const existing = guild.channels.cache.find(c =>
+      c.name === `recrut-${user.username.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 20)}` &&
+      c.type === ChannelType.GuildText
+    );
+    if (existing) {
+      await interaction.editReply({ content: `❌ Tu as déjà une candidature ouverte : ${existing}` }); return;
+    }
+
+    const ticketChannel = await guild.channels.create({
+      name: `recrut-${user.username.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 20)}`,
+      type: ChannelType.GuildText,
+      parent: CONFIG.RECRUTEMENT_CATEGORY_ID,
+      permissionOverwrites: [
+        { id: guild.roles.everyone,  deny:  [PermissionFlagsBits.ViewChannel] },
+        { id: user.id,               allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] },
+        { id: CONFIG.STAFF_ROLE_ID,  allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.ManageChannels] },
+        { id: CONFIG.SECRETAIRE_ROLE_ID, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.ManageChannels] },
+      ],
+    });
+
+    await ticketChannel.send({
+      content: `👋 <@${user.id}> | <@&${CONFIG.STAFF_ROLE_ID}>`,
+      embeds: [new EmbedBuilder()
+        .setTitle(`📩 Candidature — ${user.username}`)
+        .setColor(0x5865F2)
+        .addFields(
+          { name: '👤 Candidat',         value: `<@${user.id}>`, inline: true  },
+          { name: '🛠️ Type de dev',       value: typeDev,         inline: true  },
+          { name: '🕐 Disponibilité',     value: disponibilite,   inline: false },
+          { name: '💰 Paiement souhaité', value: paiement,        inline: true  },
+        )
+        .setFooter({ text: 'HEO Studio • Recrutement' })
+        .setTimestamp()],
+      components: [new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('recrut_accepter').setLabel('✅ Accepter').setStyle(ButtonStyle.Success),
+        new ButtonBuilder().setCustomId('recrut_refuser').setLabel('❌ Refuser').setStyle(ButtonStyle.Danger),
+        new ButtonBuilder().setCustomId('recrut_supprimer').setLabel('🗑️ Supprimer').setStyle(ButtonStyle.Secondary),
+      )],
+    });
+
+    await interaction.editReply({ content: `✅ Ta candidature a été ouverte : ${ticketChannel}` });
+    return;
+  }
+
+  // ── Supprimer ticket recrutement ──────────────────────────────────────────────
+  if (interaction.isButton() && interaction.customId === 'recrut_supprimer') {
+    if (!isStaffOrAdmin(interaction.member)) {
+      await interaction.reply({ content: '❌ Réservé au staff.', ephemeral: true }); return;
+    }
+    const channelId = interaction.channel.id;
+    await interaction.reply({
+      content: '⚠️ Tu es sûr de vouloir **supprimer définitivement** ce ticket de recrutement ?',
+      components: [new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(`recrut_confirmer_suppression_${channelId}`).setLabel('✅ Oui, supprimer').setStyle(ButtonStyle.Danger),
+        new ButtonBuilder().setCustomId('recrut_annuler_suppression').setLabel('❌ Annuler').setStyle(ButtonStyle.Secondary),
+      )],
+      ephemeral: true,
+    });
+    return;
+  }
+
+  if (interaction.isButton() && interaction.customId === 'recrut_annuler_suppression') {
+    await interaction.reply({ content: '✅ Suppression annulée.', ephemeral: true }); return;
+  }
+
+  if (interaction.isButton() && interaction.customId.startsWith('recrut_confirmer_suppression_')) {
+    const channelId = interaction.customId.replace('recrut_confirmer_suppression_', '');
+    const channel   = await interaction.guild.channels.fetch(channelId).catch(() => null);
+    if (!channel) return;
+    pendingRecrutement.delete(channelId);
+    await interaction.reply({ content: '🗑️ Suppression en cours...', ephemeral: true });
+    setTimeout(() => channel.delete().catch(() => {}), 2000);
+    return;
+  }
+
+  // ── Refuser candidature ───────────────────────────────────────────────────────
+  if (interaction.isButton() && interaction.customId === 'recrut_refuser') {
+    if (!isStaffOrAdmin(interaction.member)) {
+      await interaction.reply({ content: '❌ Réservé au staff.', ephemeral: true }); return;
+    }
+    await interaction.deferUpdate();
+    const channel = interaction.channel;
+
+    const disabledRow = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('recrut_accepter').setLabel('✅ Accepter').setStyle(ButtonStyle.Success).setDisabled(true),
+      new ButtonBuilder().setCustomId('recrut_refuser').setLabel('❌ Refusé').setStyle(ButtonStyle.Danger).setDisabled(true),
+      new ButtonBuilder().setCustomId('recrut_supprimer').setLabel('🗑️ Supprimer').setStyle(ButtonStyle.Secondary),
+    );
+    await interaction.message.edit({ components: [disabledRow] });
+
+    // Déplacer dans recrutement refusé + préfixe 🔴
+    const newName = `🔴-${channel.name.replace(/^🔴-/, '')}`;
+    await channel.setName(newName).catch(() => {});
+    await channel.setParent(CONFIG.RECRUTEMENT_REFUSE_ID, { lockPermissions: false }).catch(() => {});
+
+    await channel.send({
+      embeds: [new EmbedBuilder()
+        .setColor(0xED4245)
+        .setDescription(`❌ Candidature **refusée** par <@${interaction.user.id}>`)
+        .setTimestamp()],
+    });
+    return;
+  }
+
+  // ── Accepter candidature → sélecteur type(s) ─────────────────────────────────
+  if (interaction.isButton() && interaction.customId === 'recrut_accepter') {
+    if (!isStaffOrAdmin(interaction.member)) {
+      await interaction.reply({ content: '❌ Réservé au staff.', ephemeral: true }); return;
+    }
+    await interaction.deferUpdate();
+    const channel = interaction.channel;
+
+    const disabledRow = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('recrut_accepter').setLabel('✅ Accepté').setStyle(ButtonStyle.Success).setDisabled(true),
+      new ButtonBuilder().setCustomId('recrut_refuser').setLabel('❌ Refuser').setStyle(ButtonStyle.Danger).setDisabled(true),
+      new ButtonBuilder().setCustomId('recrut_supprimer').setLabel('🗑️ Supprimer').setStyle(ButtonStyle.Secondary),
+    );
+    await interaction.message.edit({ components: [disabledRow] });
+
+    const selectTypes = new StringSelectMenuBuilder()
+      .setCustomId('recrut_select_types')
+      .setPlaceholder('Sélectionne le ou les types retenus...')
+      .setMinValues(1)
+      .setMaxValues(4)
+      .addOptions(
+        new StringSelectMenuOptionBuilder().setLabel('🎨 UI').setValue('ui'),
+        new StringSelectMenuOptionBuilder().setLabel('🏗️ Builder').setValue('builder'),
+        new StringSelectMenuOptionBuilder().setLabel('💨 Animateur').setValue('animateur'),
+        new StringSelectMenuOptionBuilder().setLabel('💻 Scripteur').setValue('scripteur'),
+      );
+
+    await channel.send({
+      embeds: [new EmbedBuilder()
+        .setTitle('✅ Candidature acceptée — Étape 1/2')
+        .setDescription('Sélectionne le ou les **types de dev** attribués à ce candidat.')
+        .setColor(0x57F287)],
+      components: [
+        new ActionRowBuilder().addComponents(selectTypes),
+        new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId('recrut_types_valider').setLabel('➡️ Étape suivante').setStyle(ButtonStyle.Primary),
+        ),
+      ],
+    });
+    return;
+  }
+
+  // ── Select : types retenus ────────────────────────────────────────────────────
+  if (interaction.isStringSelectMenu() && interaction.customId === 'recrut_select_types') {
+    const channel  = interaction.channel;
+    const existing = pendingRecrutement.get(channel.id) ?? {};
+    existing.types = interaction.values;
+    pendingRecrutement.set(channel.id, existing);
+    await interaction.deferUpdate();
+    return;
+  }
+
+  // ── Valider types → sélecteur étoiles ────────────────────────────────────────
+  if (interaction.isButton() && interaction.customId === 'recrut_types_valider') {
+    if (!isStaffOrAdmin(interaction.member)) {
+      await interaction.reply({ content: '❌ Réservé au staff.', ephemeral: true }); return;
+    }
+    const channel = interaction.channel;
+    const pending = pendingRecrutement.get(channel.id);
+    if (!pending?.types?.length) {
+      await interaction.reply({ content: '⚠️ Sélectionne au moins un type de dev.', ephemeral: true }); return;
+    }
+    await interaction.deferUpdate();
+    await interaction.message.delete().catch(() => {});
+
+    const rows = [];
+    for (const type of pending.types) {
+      const label = DEV_TYPE_ICONS[type] ?? type;
+      rows.push(new ActionRowBuilder().addComponents(
+        new StringSelectMenuBuilder()
+          .setCustomId(`recrut_etoiles_${type}`)
+          .setPlaceholder(`Niveau pour ${label}...`)
+          .addOptions(
+            new StringSelectMenuOptionBuilder().setLabel('⭐⭐⭐⭐⭐ — 5 étoiles').setValue('0'),
+            new StringSelectMenuOptionBuilder().setLabel('⭐⭐⭐⭐ — 4 étoiles').setValue('1'),
+            new StringSelectMenuOptionBuilder().setLabel('⭐⭐⭐ — 3 étoiles').setValue('2'),
+            new StringSelectMenuOptionBuilder().setLabel('⭐⭐ — 2 étoiles').setValue('3'),
+            new StringSelectMenuOptionBuilder().setLabel('⭐ — 1 étoile').setValue('4'),
+          )
+      ));
+    }
+    rows.push(new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('recrut_etoiles_valider').setLabel('✅ Confirmer et attribuer les rôles').setStyle(ButtonStyle.Success),
+    ));
+
+    await channel.send({
+      embeds: [new EmbedBuilder()
+        .setTitle('✅ Candidature acceptée — Étape 2/2')
+        .setDescription(`Types retenus : **${pending.types.map(t => DEV_TYPE_ICONS[t] ?? t).join(', ')}**\n\nChoisis le **niveau (étoiles)** pour chaque type.`)
+        .setColor(0x57F287)],
+      components: rows,
+    });
+    return;
+  }
+
+  // ── Select : étoiles par type ─────────────────────────────────────────────────
+  if (interaction.isStringSelectMenu() && interaction.customId.startsWith('recrut_etoiles_')) {
+    const type    = interaction.customId.replace('recrut_etoiles_', '');
+    const channel = interaction.channel;
+    const pending = pendingRecrutement.get(channel.id) ?? {};
+    if (!pending.etoiles) pending.etoiles = {};
+    pending.etoiles[type] = interaction.values[0];
+    pendingRecrutement.set(channel.id, pending);
+    await interaction.deferUpdate();
+    return;
+  }
+
+  // ── Confirmer → attribuer les rôles, renommer, déplacer ──────────────────────
+  if (interaction.isButton() && interaction.customId === 'recrut_etoiles_valider') {
+    if (!isStaffOrAdmin(interaction.member)) {
+      await interaction.reply({ content: '❌ Réservé au staff.', ephemeral: true }); return;
+    }
+    await interaction.deferUpdate();
+    const channel = interaction.channel;
+    const pending = pendingRecrutement.get(channel.id);
+
+    if (!pending?.types?.length || !pending?.etoiles) {
+      await interaction.followUp({ content: '⚠️ Données manquantes, recommence.', ephemeral: true }); return;
+    }
+    for (const type of pending.types) {
+      if (pending.etoiles[type] === undefined) {
+        await interaction.followUp({ content: `⚠️ Tu n'as pas choisi le niveau pour **${DEV_TYPE_ICONS[type] ?? type}**.`, ephemeral: true }); return;
+      }
+    }
+
+    // Retrouver le candidat depuis l'embed
+    const messages    = await channel.messages.fetch({ limit: 30 });
+    const embedMsg    = messages.find(m => m.author.id === client.user.id && m.embeds?.[0]?.title?.startsWith('📩 Candidature'));
+    const candidateId = embedMsg?.embeds?.[0]?.fields?.find(f => f.name === '👤 Candidat')?.value?.replace(/[<@>]/g, '');
+    if (!candidateId) {
+      await interaction.followUp({ content: '❌ Impossible de retrouver le candidat dans l\'embed.', ephemeral: true }); return;
+    }
+
+    const guild           = interaction.guild;
+    const candidateMember = await guild.members.fetch(candidateId).catch(() => null);
+    if (!candidateMember) {
+      await interaction.followUp({ content: '❌ Le membre a quitté le serveur.', ephemeral: true }); return;
+    }
+
+    const rolesAdded = [];
+
+    if (candidateMember.roles.cache.has(CONFIG.ROLE_ATT_ENTRETIEN)) {
+      await candidateMember.roles.remove(CONFIG.ROLE_ATT_ENTRETIEN).catch(() => {});
+    }
+    await candidateMember.roles.add(CONFIG.ROLE_DEV_GLOBAL).catch(() => {});
+    await candidateMember.roles.add(CONFIG.ROLE_SEPARATION).catch(() => {});
+    rolesAdded.push(`<@&${CONFIG.ROLE_DEV_GLOBAL}>`, `<@&${CONFIG.ROLE_SEPARATION}>`);
+
+    for (const type of pending.types) {
+      const typeRoleId = CONFIG.DEV_ROLES[type];
+      const starIndex  = parseInt(pending.etoiles[type], 10);
+      const starRoleId = CONFIG.ETOILES_ROLES[type]?.[starIndex];
+      if (typeRoleId) { await candidateMember.roles.add(typeRoleId).catch(() => {}); rolesAdded.push(`<@&${typeRoleId}>`); }
+      if (starRoleId) { await candidateMember.roles.add(starRoleId).catch(() => {}); rolesAdded.push(`<@&${starRoleId}>`); }
+    }
+
+    pendingRecrutement.delete(channel.id);
+    await interaction.message.delete().catch(() => {});
+
+    const typesLabel = pending.types.map(t => {
+      const starIndex = parseInt(pending.etoiles[t], 10);
+      const stars     = '⭐'.repeat(5 - starIndex);
+      return `${DEV_TYPE_ICONS[t] ?? t} — ${stars}`;
+    }).join('\n');
+
+    await channel.send({
+      content: `🎉 <@${candidateId}>`,
+      embeds: [new EmbedBuilder()
+        .setTitle('🎉 Candidature acceptée !')
+        .setColor(0x57F287)
+        .setDescription(`Bienvenue dans l'équipe **HEO Studio** <@${candidateId}> !\nRôles attribués par <@${interaction.user.id}>.`)
+        .addFields(
+          { name: '🛠️ Types & niveaux', value: typesLabel,            inline: false },
+          { name: '🏷️ Rôles ajoutés',   value: rolesAdded.join('\n'), inline: false },
+        )
+        .setFooter({ text: 'HEO Studio • Recrutement' })
+        .setTimestamp()],
+    });
+
+    // Renommer avec préfixe 🟢 et déplacer dans recrutement terminé
+    const newName = `🟢-${channel.name.replace(/^🟢-/, '')}`;
+    await channel.setName(newName).catch(() => {});
+    await channel.setParent(CONFIG.RECRUTEMENT_TERMINE_ID, { lockPermissions: false }).catch(() => {});
     return;
   }
 
