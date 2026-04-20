@@ -338,12 +338,8 @@ client.on('interactionCreate', async (interaction) => {
           .setTitle(`🛠️ Espace dev — Contrat #${numStr} — ${info.nom}`)
           .setColor(0x5865F2)
           .addFields(
-            { name: '📋 Contrat',     value: `${contratChannel}`,   inline: true },
-            { name: '👤 Client',      value: `<@${info.clientId}>`, inline: true },
-            { name: '💰 Budget',      value: info.budget,           inline: true },
-            { name: '⏱️ Délai',       value: info.delai,            inline: true },
-            { name: '📝 Description', value: info.description,      inline: false },
-            { name: '🔨 Devs',        value: devUsers.map(u => `<@${u.id}>`).join('\n') || '*Aucun*', inline: false },
+            { name: '📋 Contrat', value: `${contratChannel}`, inline: true },
+            { name: '🔨 Devs',   value: devUsers.map(u => `<@${u.id}>`).join('\n') || '*Aucun*', inline: false },
           )
           .setFooter({ text: 'HEO Studio • Dev' })
           .setTimestamp()],
@@ -539,7 +535,20 @@ client.on('interactionCreate', async (interaction) => {
       delete info.etapeAvantAnnulation;
       saveTickets();
     }
-    const etape         = CONFIG.ETAPES[etapeRetour];
+    const etape = CONFIG.ETAPES[etapeRetour];
+
+    // Remettre le salon dev dans DEV_CONTRAT
+    const devChannelDesannule = await getDevChannel(interaction.guild, info);
+    if (devChannelDesannule) {
+      await devChannelDesannule.setParent(CONFIG.CATEGORIES.DEV_CONTRAT, { lockPermissions: false }).catch(() => {});
+      await devChannelDesannule.send({
+        embeds: [new EmbedBuilder()
+          .setColor(etape.color)
+          .setDescription(`↩️ Contrat **#${padNum(info.num)} — ${info.nom}** **désannulé** par <@${interaction.user.id}>\nRetour à l'étape : **${etape.label}**`)
+          .setTimestamp()],
+      });
+    }
+
     const restoredEmbed = EmbedBuilder.from(interaction.message.embeds[0])
       .setColor(etape.color)
       .setFooter({ text: `HEO Studio • Étape : ${etape.label}` });
