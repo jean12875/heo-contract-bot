@@ -471,10 +471,11 @@ client.on('interactionCreate', async (interaction) => {
     if (!isStaffOrAdmin(interaction.member)) {
       await interaction.reply({ content: '❌ Réservé au staff.', ephemeral: true }); return;
     }
+    const channelId = interaction.channel.id;
     await interaction.reply({
       content: '⚠️ Tu es sûr de vouloir **annuler** ce contrat ?',
       components: [new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId('confirmer_annulation').setLabel('✅ Oui, annuler').setStyle(ButtonStyle.Danger),
+        new ButtonBuilder().setCustomId(`confirmer_annulation_${channelId}`).setLabel('✅ Oui, annuler').setStyle(ButtonStyle.Danger),
         new ButtonBuilder().setCustomId('annuler_annulation').setLabel('❌ Retour').setStyle(ButtonStyle.Secondary),
       )],
       ephemeral: true,
@@ -486,9 +487,11 @@ client.on('interactionCreate', async (interaction) => {
     await interaction.reply({ content: '✅ Annulation abandonnée.', ephemeral: true }); return;
   }
 
-  if (interaction.isButton() && interaction.customId === 'confirmer_annulation') {
+  if (interaction.isButton() && interaction.customId.startsWith('confirmer_annulation_')) {
     await interaction.deferUpdate();
-    const channel       = interaction.channel;
+    const contratChannelId = interaction.customId.replace('confirmer_annulation_', '');
+    const channel = await interaction.guild.channels.fetch(contratChannelId).catch(() => null);
+    if (!channel) { console.error('confirmer_annulation: salon introuvable', contratChannelId); return; }
     const etapeActuelle = ticketEtapes.get(channel.id) ?? 0;
     const info          = ticketInfos.get(channel.id);
     if (info) {
@@ -562,10 +565,11 @@ client.on('interactionCreate', async (interaction) => {
     if (!isStaffOrAdmin(interaction.member)) {
       await interaction.reply({ content: '❌ Réservé au staff.', ephemeral: true }); return;
     }
+    const channelId = interaction.channel.id;
     await interaction.reply({
       content: '⚠️ Tu es sûr de vouloir **supprimer définitivement** ce ticket ?\n> Le salon dev associé sera également supprimé.',
       components: [new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId('confirmer_suppression').setLabel('✅ Oui, supprimer').setStyle(ButtonStyle.Danger),
+        new ButtonBuilder().setCustomId(`confirmer_suppression_${channelId}`).setLabel('✅ Oui, supprimer').setStyle(ButtonStyle.Danger),
         new ButtonBuilder().setCustomId('annuler_suppression').setLabel('❌ Annuler').setStyle(ButtonStyle.Secondary),
       )],
       ephemeral: true,
@@ -573,15 +577,14 @@ client.on('interactionCreate', async (interaction) => {
     return;
   }
 
-  if (interaction.isButton() && interaction.customId === 'confirmer_suppression') {
-    const channel = interaction.channel;
-    const info    = ticketInfos.get(channel.id);
+  if (interaction.isButton() && interaction.customId.startsWith('confirmer_suppression_') && !interaction.customId.startsWith('confirmer_suppression_dev')) {
+    const contratChannelId = interaction.customId.replace('confirmer_suppression_', '');
+    const channel = await interaction.guild.channels.fetch(contratChannelId).catch(() => null);
+    if (!channel) return;
+    const info = ticketInfos.get(channel.id);
 
-    // Supprimer le salon dev associé s'il existe
     const devChannel = await getDevChannel(interaction.guild, info);
-    if (devChannel) {
-      await devChannel.delete().catch(() => {});
-    }
+    if (devChannel) await devChannel.delete().catch(() => {});
 
     ticketEtapes.delete(channel.id);
     ticketInfos.delete(channel.id);
