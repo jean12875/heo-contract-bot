@@ -1040,7 +1040,6 @@ client.on('interactionCreate', async (interaction) => {
 
 });
 
-
 // ════════════════════════════════════════════════════════════════════════════
 // ─── SUPPORT TICKETS ────────────────────────────────────────────────────────
 // ════════════════════════════════════════════════════════════════════════════
@@ -1056,6 +1055,13 @@ const SUPPORT_CONFIG = {
     signalement: { label: '⚠️ Signalement', emoji: '⚠️', color: 0xE74C3C },
   },
 };
+
+function getSupportEmoji(typeKey) {
+  if (typeKey === 'question')    return '❓';
+  if (typeKey === 'suggestion')  return '💡';
+  if (typeKey === 'signalement') return '⚠️';
+  return typeKey;
+}
 
 // ── Setup panel support ────────────────────────────────────────────────────
 if (process.argv[2] === 'setup-support') {
@@ -1083,12 +1089,13 @@ async function handleSupportCreate(interaction, typeKey) {
   const guild = interaction.guild;
   const user  = interaction.user;
   const type  = SUPPORT_CONFIG.TYPES[typeKey];
+  const emoji = getSupportEmoji(typeKey);
 
   // Anti-doublon : un seul ticket par type par utilisateur
   const existing = guild.channels.cache.find(c =>
     c.parentId === SUPPORT_CONFIG.CATEGORY_ID &&
     c.topic === user.id &&
-    c.name.includes(typeKey)
+    c.name.includes(emoji)
   );
   if (existing) {
     await interaction.reply({ content: `❌ Tu as déjà un ticket de ce type ouvert : ${existing}`, ephemeral: true });
@@ -1098,7 +1105,7 @@ async function handleSupportCreate(interaction, typeKey) {
   await interaction.deferReply({ ephemeral: true });
 
   const safeName    = user.username.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 20);
-  const channelName = `${typeKey}-${safeName}`;
+  const channelName = `${emoji}-${safeName}`;
 
   const ticketChannel = await guild.channels.create({
     name: channelName,
@@ -1174,7 +1181,6 @@ client.on('interactionCreate', async (interaction) => {
     }
     await interaction.deferUpdate();
 
-    // Retirer les perms du créateur
     const creatorId = channel.topic;
     if (creatorId) {
       await channel.permissionOverwrites.edit(creatorId, { SendMessages: false }).catch(() => {});
@@ -1189,7 +1195,7 @@ client.on('interactionCreate', async (interaction) => {
         .setDescription(`🔒 Ticket **fermé** par <@${interaction.user.id}>`)
         .setTimestamp()],
       components: [new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId('support_fermer')   .setLabel('🔒 Fermé')      .setStyle(ButtonStyle.Secondary).setDisabled(true),
+        new ButtonBuilder().setCustomId('support_fermer')    .setLabel('🔒 Fermé')     .setStyle(ButtonStyle.Secondary).setDisabled(true),
         new ButtonBuilder().setCustomId('support_desannuler').setLabel('🔓 Rouvrir')   .setStyle(ButtonStyle.Primary),
         new ButtonBuilder().setCustomId('support_supprimer') .setLabel('🗑️ Supprimer').setStyle(ButtonStyle.Danger),
       )],
@@ -1197,7 +1203,7 @@ client.on('interactionCreate', async (interaction) => {
     return;
   }
 
-  // ── Rouvrir / Désannuler (staff/secrétaire) ───────────────────────────────
+  // ── Rouvrir (staff/secrétaire) ────────────────────────────────────────────
   if (interaction.isButton() && interaction.customId === 'support_desannuler') {
     if (!isStaffOrAdmin(interaction.member)) {
       await interaction.reply({ content: '❌ Réservé au staff.', ephemeral: true }); return;
@@ -1205,7 +1211,6 @@ client.on('interactionCreate', async (interaction) => {
     const channel = interaction.channel;
     await interaction.deferUpdate();
 
-    // Redonner les perms au créateur
     const creatorId = channel.topic;
     if (creatorId) {
       await channel.permissionOverwrites.edit(creatorId, {
@@ -1215,7 +1220,6 @@ client.on('interactionCreate', async (interaction) => {
       }).catch(() => {});
     }
 
-    // Retirer le préfixe 🔒
     const newName = channel.name.replace(/^🔒-/, '');
     await channel.setName(newName).catch(() => {});
 
@@ -1225,8 +1229,8 @@ client.on('interactionCreate', async (interaction) => {
         .setDescription(`🔓 Ticket **rouvert** par <@${interaction.user.id}>`)
         .setTimestamp()],
       components: [new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId('support_fermer')   .setLabel('🔒 Fermer')     .setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder().setCustomId('support_supprimer').setLabel('🗑️ Supprimer') .setStyle(ButtonStyle.Danger),
+        new ButtonBuilder().setCustomId('support_fermer')    .setLabel('🔒 Fermer')    .setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId('support_supprimer') .setLabel('🗑️ Supprimer').setStyle(ButtonStyle.Danger),
       )],
     });
     return;
