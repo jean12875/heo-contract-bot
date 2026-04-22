@@ -58,17 +58,21 @@ const CONFIG = {
   ROLE_SEPARATION:              '1485191413829337293',
 
   DEV_ROLES: {
-    builder:   '1488194780809789511',
-    ui:        '1488194616413913088',
-    scripteur: '1488194696831307776',
-    animateur: '1488581098563702914',
+    builder:      '1488194780809789511',
+    ui:           '1488194616413913088',
+    scripteur:    '1488194696831307776',
+    animateur:    '1488581098563702914',
+    modelisateur: '1496426361265328138',
+    designer:     '1496429573900992614',
   },
 
   ETOILES_ROLES: {
-    ui:        ['1485321773665751141','1485321825834766587','1485321711158038841','1485321660138524763','1485320858624065757'],
-    builder:   ['1485322061994786918','1485321763985293392','1485321427845648385','1485321015721591024','1485320049073061952'],
-    animateur: ['1488587193932058654','1488587312269885590','1488587339105308752','1488587372319871197','1488587400518041612'],
-    scripteur: ['1485321122646851735','1485321178859180165','1485321077495300298','1485321012709953717','1488194696831307776'],
+    ui:           ['1485321773665751141','1485321825834766587','1485321711158038841','1485321660138524763','1485320858624065757'],
+    builder:      ['1485322061994786918','1485321763985293392','1485321427845648385','1485321015721591024','1485320049073061952'],
+    animateur:    ['1488587193932058654','1488587312269885590','1488587339105308752','1488587372319871197','1488587400518041612'],
+    scripteur:    ['1485321122646851735','1485321178859180165','1485321077495300298','1485321012709953717','1488194696831307776'],
+    modelisateur: ['1496427405462605854','1496427628897243345','1496427675437371462','1496427717342793879','1496427769217679450'],
+    designer:     ['1496429816365322260','1496429980912058408','1496430030610366504','1496430076038742156','1496430128396501052'],
   },
 };
 // ──────────────────────────────────────────────────────────────────────────────
@@ -114,10 +118,12 @@ for (const [channelId, info] of ticketInfos.entries()) {
 // ──────────────────────────────────────────────────────────────────────────────
 
 const DEV_TYPE_ICONS = {
-  builder:   '🏗️ Builder',
-  scripteur: '💻 Scripteur',
-  ui:        '🎨 UI',
-  animateur: '💨 Animateur',
+  builder:      '🏗️ Builder',
+  scripteur:    '💻 Scripteur',
+  ui:           '🎨 UI',
+  animateur:    '💨 Animateur',
+  modelisateur: '🗿 Modélisateur',
+  designer:     '🖌️ Designer',
 };
 
 function padNum(n) {
@@ -863,12 +869,14 @@ client.on('interactionCreate', async (interaction) => {
       .setCustomId('recrut_select_types')
       .setPlaceholder('Sélectionne le ou les types retenus...')
       .setMinValues(1)
-      .setMaxValues(4)
+      .setMaxValues(6)
       .addOptions(
         new StringSelectMenuOptionBuilder().setLabel('🎨 UI').setValue('ui'),
         new StringSelectMenuOptionBuilder().setLabel('🏗️ Builder').setValue('builder'),
         new StringSelectMenuOptionBuilder().setLabel('💨 Animateur').setValue('animateur'),
         new StringSelectMenuOptionBuilder().setLabel('💻 Scripteur').setValue('scripteur'),
+        new StringSelectMenuOptionBuilder().setLabel('🗿 Modélisateur').setValue('modelisateur'),
+        new StringSelectMenuOptionBuilder().setLabel('🖌️ Designer').setValue('designer'),
       );
 
     await channel.send({
