@@ -1228,10 +1228,7 @@ client.on('interactionCreate', async (interaction) => {
         .setColor(0x57F287)
         .setDescription(`🔓 Ticket **rouvert** par <@${interaction.user.id}>`)
         .setTimestamp()],
-      components: [new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId('support_fermer')    .setLabel('🔒 Fermer')    .setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder().setCustomId('support_supprimer') .setLabel('🗑️ Supprimer').setStyle(ButtonStyle.Danger),
-      )],
+  
     });
     return;
   }
