@@ -724,7 +724,7 @@ client.on('interactionCreate', async (interaction) => {
       .setTitle('📩 Candidature Dev — HEO Studio');
     modal.addComponents(
       new ActionRowBuilder().addComponents(
-        new TextInputBuilder().setCustomId('type_dev').setLabel('Type de développeur').setStyle(TextInputStyle.Short).setPlaceholder('Ex: UI, Scripting, Builder, Animation (ou plusieurs)').setRequired(true)
+        new TextInputBuilder().setCustomId('type_dev').setLabel('Type de développeur').setStyle(TextInputStyle.Short).setPlaceholder('UI, Builder, Animateur, Scripteur, Modélisateur, Designer').setRequired(true)
       ),
       new ActionRowBuilder().addComponents(
         new TextInputBuilder().setCustomId('disponibilite').setLabel('Disponibilité (jours / horaires)').setStyle(TextInputStyle.Short).setPlaceholder('Ex: Lun-Ven 18h-22h, Week-end toute la journée...').setRequired(true)
