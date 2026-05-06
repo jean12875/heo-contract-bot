@@ -287,9 +287,10 @@ client.on('interactionCreate', async (interaction) => {
     const guild   = interaction.guild;
     const tickets = [];
     for (const [channelId, info] of ticketInfos.entries()) {
-      const channel = guild.channels.cache.get(channelId);
-      if (!channel) continue;
-      const etapeIndex = ticketEtapes.get(channelId) ?? 0;
+  const channel = guild.channels.cache.get(channelId);
+  if (!channel) continue;
+  if (!info || info.num === undefined || info.nom === undefined) continue;
+  const etapeIndex = ticketEtapes.get(channelId) ?? 0;
       if (etapeIndex === -1) continue;
       const etape = CONFIG.ETAPES[etapeIndex];
       tickets.push(`${etape.label} — **#${padNum(info.num)} ${info.nom}** — <@${info.clientId}> — ${channel}`);
