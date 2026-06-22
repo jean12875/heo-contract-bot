@@ -510,9 +510,10 @@ client.on('interactionCreate', async (interaction) => {
     }
 
     const devUsers = [];
+    const vusDev   = new Set();
     for (const key of ['p1', 'p2', 'p3', 'p4', 'p5']) {
       const u = interaction.options.getUser(key);
-      if (u) devUsers.push(u);
+      if (u && !vusDev.has(u.id)) { vusDev.add(u.id); devUsers.push(u); }
     }
 
     const numStr       = padNum(info.num);
@@ -1045,6 +1046,7 @@ client.on('interactionCreate', async (interaction) => {
     if (!candidateId) {
       await interaction.reply({ content: '❌ Impossible de retrouver le candidat.', ephemeral: true }); return;
     }
+    await interaction.deferReply({ ephemeral: true });
 
     // Ajoute le rôle « en attente d'entretien » au candidat.
     const candidateMember = await interaction.guild.members.fetch(candidateId).catch(() => null);
@@ -1052,7 +1054,7 @@ client.on('interactionCreate', async (interaction) => {
       await candidateMember.roles.add(CONFIG.ROLE_ATT_ENTRETIEN).catch(() => {});
     }
 
-    await interaction.reply({ content: '✅ Entretien proposé au candidat.', ephemeral: true });
+    await interaction.editReply({ content: '✅ Entretien proposé au candidat.' });
     await channel.send({
       content: `🎤 <@${candidateId}>`,
       embeds: [new EmbedBuilder()
@@ -1248,21 +1250,26 @@ client.on('interactionCreate', async (interaction) => {
       await interaction.followUp({ content: '❌ Le membre a quitté le serveur.', ephemeral: true }); return;
     }
 
-    const rolesAdded = [];
+    const rolesAdded  = [];
+    const rolesFailed = [];
+    // Ajoute un rôle en notant s'il a échoué (souvent : rôle du bot trop bas dans la hiérarchie).
+    const tryAddRole = async (roleId) => {
+      try { await candidateMember.roles.add(roleId); rolesAdded.push(`<@&${roleId}>`); }
+      catch { rolesFailed.push(`<@&${roleId}>`); }
+    };
 
     if (candidateMember.roles.cache.has(CONFIG.ROLE_ATT_ENTRETIEN)) {
       await candidateMember.roles.remove(CONFIG.ROLE_ATT_ENTRETIEN).catch(() => {});
     }
-    await candidateMember.roles.add(CONFIG.ROLE_DEV_GLOBAL).catch(() => {});
-    await candidateMember.roles.add(CONFIG.ROLE_SEPARATION).catch(() => {});
-    rolesAdded.push(`<@&${CONFIG.ROLE_DEV_GLOBAL}>`, `<@&${CONFIG.ROLE_SEPARATION}>`);
+    await tryAddRole(CONFIG.ROLE_DEV_GLOBAL);
+    await tryAddRole(CONFIG.ROLE_SEPARATION);
 
     for (const type of pending.types) {
       const typeRoleId = CONFIG.DEV_ROLES[type];
       const starIndex  = parseInt(pending.etoiles[type], 10);
       const starRoleId = CONFIG.ETOILES_ROLES[type]?.[starIndex];
-      if (typeRoleId) { await candidateMember.roles.add(typeRoleId).catch(() => {}); rolesAdded.push(`<@&${typeRoleId}>`); }
-      if (starRoleId) { await candidateMember.roles.add(starRoleId).catch(() => {}); rolesAdded.push(`<@&${starRoleId}>`); }
+      if (typeRoleId) await tryAddRole(typeRoleId);
+      if (starRoleId) await tryAddRole(starRoleId);
     }
 
     recruitInfos.delete(channel.id);
@@ -1275,19 +1282,21 @@ client.on('interactionCreate', async (interaction) => {
       return `${DEV_TYPE_ICONS[t] ?? t} — ${stars}`;
     }).join('\n');
 
-    await channel.send({
-      content: `🎉 <@${candidateId}>`,
-      embeds: [new EmbedBuilder()
-        .setTitle('🎉 Candidature acceptée !')
-        .setColor(0x57F287)
-        .setDescription(`Bienvenue dans l'équipe **HEO Studio** <@${candidateId}> !\nRôles attribués par <@${interaction.user.id}>.`)
-        .addFields(
-          { name: '🛠️ Types & niveaux', value: typesLabel,            inline: false },
-          { name: '🏷️ Rôles ajoutés',   value: rolesAdded.join('\n'), inline: false },
-        )
-        .setFooter({ text: 'HEO Studio • Recrutement' })
-        .setTimestamp()],
-    });
+    const acceptEmbed = new EmbedBuilder()
+      .setTitle('🎉 Candidature acceptée !')
+      .setColor(0x57F287)
+      .setDescription(`Bienvenue dans l'équipe **HEO Studio** <@${candidateId}> !\nRôles attribués par <@${interaction.user.id}>.`)
+      .addFields(
+        { name: '🛠️ Types & niveaux', value: typesLabel || '*Aucun*',                 inline: false },
+        { name: '🏷️ Rôles ajoutés',   value: rolesAdded.join('\n') || '*Aucun*',       inline: false },
+      )
+      .setFooter({ text: 'HEO Studio • Recrutement' })
+      .setTimestamp();
+    // Alerte si certains rôles n'ont pas pu être attribués (hiérarchie du bot, etc.).
+    if (rolesFailed.length) {
+      acceptEmbed.addFields({ name: '⚠️ Rôles NON attribués', value: `${rolesFailed.join('\n')}\n\n> Vérifie que le rôle du bot est **au-dessus** de ces rôles dans les paramètres du serveur, puis réattribue-les à la main.`, inline: false });
+    }
+    await channel.send({ content: `🎉 <@${candidateId}>`, embeds: [acceptEmbed] });
 
     // Renommer avec préfixe 🟢 et déplacer dans recrutement terminé
     const newName = `🟢-${channel.name.replace(/^🟢-/, '')}`;
