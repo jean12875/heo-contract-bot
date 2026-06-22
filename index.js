@@ -254,6 +254,59 @@ async function getContractMessage(channel, info) {
   }
 }
 
+// Logique partagée par les boutons ◀️/➡️ ET les commandes /back et /next.
+// sens = 'next' ou 'back'. Gère perms, garde-fous, déplacement de catégorie,
+// archivage du salon dev si TERMINE, et mise à jour de l'embed du contrat.
+async function changerEtape(interaction, sens) {
+  if (!isStaffOrAdmin(interaction.member)) {
+    return interaction.reply({ content: '❌ Tu n\'as pas la permission de faire ça.', ephemeral: true });
+  }
+  const channel = interaction.channel;
+  const info    = ticketInfos.get(channel.id);
+  if (!info) {
+    return interaction.reply({ content: '⚠️ Ce salon n\'est pas un contrat reconnu par le bot.', ephemeral: true });
+  }
+  const etapeActuelle = ticketEtapes.get(channel.id) ?? 0;
+  if (etapeActuelle === -1) {
+    return interaction.reply({ content: '⚠️ Ce contrat est annulé. Utilise « ↩️ Désannuler » avant.', ephemeral: true });
+  }
+  const cible = sens === 'next' ? etapeActuelle + 1 : etapeActuelle - 1;
+  if (cible < 0)                       return interaction.reply({ content: '⚠️ Déjà à la première étape.', ephemeral: true });
+  if (cible >= CONFIG.ETAPES.length)   return interaction.reply({ content: '✅ Déjà à l\'étape finale.', ephemeral: true });
+
+  const isButton = typeof interaction.isButton === 'function' && interaction.isButton();
+  if (isButton) await interaction.deferUpdate();
+  else          await interaction.deferReply({ ephemeral: true });
+
+  await channel.setParent(CONFIG.CATEGORIES[CONFIG.ETAPES[cible].id], { lockPermissions: false }).catch(() => {});
+  ticketEtapes.set(channel.id, cible);
+  info.etapeIndex = cible;
+  saveTickets();
+
+  // Si on passe à TERMINE, on archive le salon dev associé.
+  if (CONFIG.ETAPES[cible].id === 'TERMINE') {
+    const devChannel = await getDevChannel(interaction.guild, info);
+    if (devChannel) {
+      await devChannel.setParent(CONFIG.CATEGORIES.DEV_TERMINE, { lockPermissions: false }).catch(() => {});
+      await devChannel.send({
+        embeds: [new EmbedBuilder()
+          .setColor(0x57F287)
+          .setDescription(`✅ Contrat **#${padNum(info.num)} — ${info.nom}** marqué comme **terminé** par <@${interaction.user.id}>`)
+          .setTimestamp()],
+      }).catch(() => {});
+    }
+  }
+
+  const embed = buildEmbed(info.num, info.nom, info.description, info.budget, info.delai, { id: info.clientId }, cible);
+  const row   = buildStaffRow(cible);
+  // Pour un bouton, le message à éditer EST celui qui porte le bouton.
+  // Pour une commande, on retrouve le message du contrat via son ID stocké.
+  const contractMsg = isButton ? interaction.message : await getContractMessage(channel, info);
+  if (contractMsg) await contractMsg.edit({ embeds: [embed], components: [row] }).catch(() => {});
+
+  if (!isButton) await interaction.editReply({ content: `✅ Étape : **${CONFIG.ETAPES[cible].label}**` });
+}
+
 // ─── READY ────────────────────────────────────────────────────────────────────
 client.once('ready', async () => {
   console.log(`✅ Connecté en tant que ${client.user.tag}`);
@@ -286,6 +339,14 @@ async function registerSlashCommands() {
     new SlashCommandBuilder()
       .setName('contrats')
       .setDescription('Liste tous les contrats en cours')
+      .toJSON(),
+    new SlashCommandBuilder()
+      .setName('next')
+      .setDescription('Passe le contrat de ce salon à l\'étape suivante')
+      .toJSON(),
+    new SlashCommandBuilder()
+      .setName('back')
+      .setDescription('Ramène le contrat de ce salon à l\'étape précédente')
       .toJSON(),
     new SlashCommandBuilder()
       .setName('assign')
@@ -365,7 +426,10 @@ client.on('interactionCreate', async (interaction) => {
 
   // ── /contrats ────────────────────────────────────────────────────────────────
   if (interaction.isChatInputCommand() && interaction.commandName === 'contrats') {
-    await interaction.deferReply({ ephemeral: false });
+    if (!interaction.member?.roles?.cache?.has(CONFIG.SECRETAIRE_ROLE_ID)) {
+      await interaction.reply({ content: '❌ Commande réservée aux secrétaires.', ephemeral: true }); return;
+    }
+    await interaction.deferReply({ ephemeral: true });
     const guild   = interaction.guild;
     const tickets = [];
     for (const [channelId, info] of ticketInfos.entries()) {
@@ -389,6 +453,12 @@ client.on('interactionCreate', async (interaction) => {
         .setFooter({ text: `${tickets.length} contrat(s) actif(s)` })
         .setTimestamp()],
     });
+    return;
+  }
+
+  // ── /next et /back (équivalents des boutons ➡️ / ◀️) ──────────────────────────
+  if (interaction.isChatInputCommand() && (interaction.commandName === 'next' || interaction.commandName === 'back')) {
+    await changerEtape(interaction, interaction.commandName === 'next' ? 'next' : 'back');
     return;
   }
 
@@ -585,62 +655,13 @@ client.on('interactionCreate', async (interaction) => {
 
   // ── Étape précédente ──────────────────────────────────────────────────────────
   if (interaction.isButton() && interaction.customId === 'etape_precedente') {
-    if (!isStaffOrAdmin(interaction.member)) {
-      await interaction.reply({ content: '❌ Tu n\'as pas la permission de faire ça.', ephemeral: true }); return;
-    }
-    const channel         = interaction.channel;
-    const etapeActuelle   = ticketEtapes.get(channel.id) ?? 0;
-    const etapePrecedente = etapeActuelle - 1;
-    if (etapePrecedente < 0) { await interaction.reply({ content: '⚠️ Déjà à la première étape.', ephemeral: true }); return; }
-    const info = ticketInfos.get(channel.id);
-    if (!info) {
-      await interaction.reply({ content: '⚠️ Ce contrat n\'est plus reconnu par le bot (données perdues après un redémarrage). Crée un nouveau ticket ou contacte un admin.', ephemeral: true }); return;
-    }
-    await interaction.deferUpdate();
-    await channel.setParent(CONFIG.CATEGORIES[CONFIG.ETAPES[etapePrecedente].id], { lockPermissions: false });
-    ticketEtapes.set(channel.id, etapePrecedente);
-    info.etapeIndex = etapePrecedente;
-    saveTickets();
-    const clientUser = await client.users.fetch(info.clientId);
-    await interaction.message.edit({ embeds: [buildEmbed(info.num, info.nom, info.description, info.budget, info.delai, clientUser, etapePrecedente)], components: [buildStaffRow(etapePrecedente)] });
+    await changerEtape(interaction, 'back');
     return;
   }
 
   // ── Étape suivante ────────────────────────────────────────────────────────────
   if (interaction.isButton() && interaction.customId === 'etape_suivante') {
-    if (!isStaffOrAdmin(interaction.member)) {
-      await interaction.reply({ content: '❌ Tu n\'as pas la permission de faire ça.', ephemeral: true }); return;
-    }
-    const channel       = interaction.channel;
-    const etapeActuelle = ticketEtapes.get(channel.id) ?? 0;
-    const nouvelleEtape = etapeActuelle + 1;
-    if (nouvelleEtape >= CONFIG.ETAPES.length) { await interaction.reply({ content: '✅ Déjà à l\'étape finale.', ephemeral: true }); return; }
-    const info = ticketInfos.get(channel.id);
-    if (!info) {
-      await interaction.reply({ content: '⚠️ Ce contrat n\'est plus reconnu par le bot (données perdues après un redémarrage). Crée un nouveau ticket ou contacte un admin.', ephemeral: true }); return;
-    }
-    await interaction.deferUpdate();
-    await channel.setParent(CONFIG.CATEGORIES[CONFIG.ETAPES[nouvelleEtape].id], { lockPermissions: false });
-    ticketEtapes.set(channel.id, nouvelleEtape);
-    info.etapeIndex = nouvelleEtape;
-    saveTickets();
-
-    // Si on passe à TERMINE, déplacer le salon dev dans la catégorie archive terminé
-    if (CONFIG.ETAPES[nouvelleEtape].id === 'TERMINE') {
-      const devChannel = await getDevChannel(interaction.guild, info);
-      if (devChannel) {
-        await devChannel.setParent(CONFIG.CATEGORIES.DEV_TERMINE, { lockPermissions: false }).catch(() => {});
-        await devChannel.send({
-          embeds: [new EmbedBuilder()
-            .setColor(0x57F287)
-            .setDescription(`✅ Contrat **#${padNum(info.num)} — ${info.nom}** marqué comme **terminé** par <@${interaction.user.id}>`)
-            .setTimestamp()],
-        });
-      }
-    }
-
-    const clientUser = await client.users.fetch(info.clientId);
-    await interaction.message.edit({ embeds: [buildEmbed(info.num, info.nom, info.description, info.budget, info.delai, clientUser, nouvelleEtape)], components: [buildStaffRow(nouvelleEtape)] });
+    await changerEtape(interaction, 'next');
     return;
   }
 
@@ -666,6 +687,9 @@ client.on('interactionCreate', async (interaction) => {
   }
 
   if (interaction.isButton() && interaction.customId.startsWith('confirmer_annulation_')) {
+    if (!isStaffOrAdmin(interaction.member)) {
+      await interaction.reply({ content: '❌ Réservé au staff.', ephemeral: true }); return;
+    }
     await interaction.deferUpdate();
     const contratChannelId = interaction.customId.replace('confirmer_annulation_', '');
     const channel = await interaction.guild.channels.fetch(contratChannelId).catch(() => null);
@@ -775,6 +799,9 @@ client.on('interactionCreate', async (interaction) => {
   }
 
   if (interaction.isButton() && interaction.customId.startsWith('confirmer_suppression_') && !interaction.customId.startsWith('confirmer_suppression_dev')) {
+    if (!isStaffOrAdmin(interaction.member)) {
+      await interaction.reply({ content: '❌ Réservé au staff.', ephemeral: true }); return;
+    }
     const contratChannelId = interaction.customId.replace('confirmer_suppression_', '');
     const channel = await interaction.guild.channels.fetch(contratChannelId).catch(() => null);
     if (!channel) return;
@@ -816,6 +843,9 @@ client.on('interactionCreate', async (interaction) => {
   }
 
   if (interaction.isButton() && interaction.customId === 'confirmer_suppression_dev') {
+    if (!isStaffOrAdmin(interaction.member)) {
+      await interaction.reply({ content: '❌ Réservé au staff.', ephemeral: true }); return;
+    }
     const devChannel = interaction.channel;
 
     // Trouver le contrat associé à ce salon dev et retirer le devChannelId
@@ -909,6 +939,7 @@ client.on('interactionCreate', async (interaction) => {
         .setTimestamp()],
       components: [new ActionRowBuilder().addComponents(
         new ButtonBuilder().setCustomId('recrut_accepter').setLabel('✅ Accepter').setStyle(ButtonStyle.Success),
+        new ButtonBuilder().setCustomId('recrut_entretien').setLabel('🎤 Entretien').setStyle(ButtonStyle.Primary),
         new ButtonBuilder().setCustomId('recrut_refuser').setLabel('❌ Refuser').setStyle(ButtonStyle.Danger),
         new ButtonBuilder().setCustomId('recrut_supprimer').setLabel('🗑️ Supprimer').setStyle(ButtonStyle.Secondary),
       )],
@@ -940,6 +971,9 @@ client.on('interactionCreate', async (interaction) => {
   }
 
   if (interaction.isButton() && interaction.customId.startsWith('recrut_confirmer_suppression_')) {
+    if (!isStaffOrAdmin(interaction.member)) {
+      await interaction.reply({ content: '❌ Réservé au staff.', ephemeral: true }); return;
+    }
     const channelId = interaction.customId.replace('recrut_confirmer_suppression_', '');
     const channel   = await interaction.guild.channels.fetch(channelId).catch(() => null);
     if (!channel) return;
@@ -947,6 +981,48 @@ client.on('interactionCreate', async (interaction) => {
     saveRecruits();
     await interaction.reply({ content: '🗑️ Suppression en cours...', ephemeral: true });
     setTimeout(() => channel.delete().catch(() => {}), 2000);
+    return;
+  }
+
+  // ── Entretien : portfolio insuffisant → entretien oral ───────────────────────
+  if (interaction.isButton() && interaction.customId === 'recrut_entretien') {
+    if (!isStaffOrAdmin(interaction.member)) {
+      await interaction.reply({ content: '❌ Réservé au staff.', ephemeral: true }); return;
+    }
+    const channel = interaction.channel;
+
+    // Retrouve le candidat (mémorisé à l'ouverture, repli sur l'embed sinon).
+    let candidateId = recruitInfos.get(channel.id)?.candidateId;
+    if (!candidateId) {
+      const messages = await channel.messages.fetch({ limit: 50 });
+      const embedMsg = messages.find(m => m.author.id === client.user.id && m.embeds?.[0]?.title?.startsWith('📩 Candidature'));
+      candidateId = embedMsg?.embeds?.[0]?.fields?.find(f => f.name === '👤 Candidat')?.value?.replace(/[<@>]/g, '');
+    }
+    if (!candidateId) {
+      await interaction.reply({ content: '❌ Impossible de retrouver le candidat.', ephemeral: true }); return;
+    }
+
+    // Ajoute le rôle « en attente d'entretien » au candidat.
+    const candidateMember = await interaction.guild.members.fetch(candidateId).catch(() => null);
+    if (candidateMember) {
+      await candidateMember.roles.add(CONFIG.ROLE_ATT_ENTRETIEN).catch(() => {});
+    }
+
+    await interaction.reply({ content: '✅ Entretien proposé au candidat.', ephemeral: true });
+    await channel.send({
+      content: `🎤 <@${candidateId}>`,
+      embeds: [new EmbedBuilder()
+        .setColor(0x5865F2)
+        .setTitle('🎤 Entretien oral requis')
+        .setDescription(
+          `Bonjour <@${candidateId}>,\n\n` +
+          'Ton portfolio ne nous permet pas encore de statuer sur ta candidature. ' +
+          'Nous te proposons donc un **entretien oral avec un secrétaire** afin de mieux évaluer ton profil.\n\n' +
+          '🔔 Tu seras **pingé ici même** au moment de l\'entretien. Merci de rester disponible et de surveiller ce salon !'
+        )
+        .setFooter({ text: 'HEO Studio • Recrutement' })
+        .setTimestamp()],
+    });
     return;
   }
 
