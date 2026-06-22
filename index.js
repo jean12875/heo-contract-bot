@@ -16,6 +16,7 @@ const {
 } = require('discord.js');
 const fs = require('fs');
 const { Redis } = require('@upstash/redis');
+const transcripts = require('discord-html-transcripts');
 
 // ─── STOCKAGE : Upstash Redis si configuré, sinon fichiers locaux (repli) ──────
 // Sur Render, le disque est effacé à chaque redémarrage : sans Redis, l'état
@@ -57,6 +58,8 @@ const CONFIG = {
   PANEL_CHANNEL_ID:   '1495692176020078602',
   STAFF_ROLE_ID:      '1487848016110162153',
   SECRETAIRE_ROLE_ID: '1490464910549712937',
+  LOG_CHANNEL_ID:            '1518537607481397379',
+  LOG_TRANSCRIPT_CHANNEL_ID: '1518537756526121030',
 
   CATEGORIES: {
     NEGOCIATION:   '1487848273355210803',
@@ -112,8 +115,11 @@ const CONFIG = {
 // ─── PERSISTANCE ──────────────────────────────────────────────────────────────
 const TICKETS_FILE = './tickets.json';
 const RECRUITS_FILE = './recruits.json';
+const COOLDOWNS_FILE = './cooldowns.json';
 const REDIS_TICKETS_KEY = 'heo:tickets';
 const REDIS_RECRUITS_KEY = 'heo:recruits';
+const REDIS_COOLDOWNS_KEY = 'heo:refuscooldowns';
+const REFUS_COOLDOWN_MS = 30 * 24 * 60 * 60 * 1000; // 1 mois
 
 // Charge un Map persisté depuis Redis (ou un fichier local en repli).
 async function loadMap(redisKey, file) {
@@ -141,15 +147,18 @@ function saveMap(map, redisKey, file) {
   try { fs.writeFileSync(file, JSON.stringify(obj)); } catch (e) { console.error(`⚠️ save ${file}:`, e); }
 }
 
-const loadTickets  = () => loadMap(REDIS_TICKETS_KEY, TICKETS_FILE);
-const saveTickets  = () => saveMap(ticketInfos, REDIS_TICKETS_KEY, TICKETS_FILE);
-const loadRecruits = () => loadMap(REDIS_RECRUITS_KEY, RECRUITS_FILE);
-const saveRecruits = () => saveMap(recruitInfos, REDIS_RECRUITS_KEY, RECRUITS_FILE);
+const loadTickets   = () => loadMap(REDIS_TICKETS_KEY, TICKETS_FILE);
+const saveTickets   = () => saveMap(ticketInfos, REDIS_TICKETS_KEY, TICKETS_FILE);
+const loadRecruits  = () => loadMap(REDIS_RECRUITS_KEY, RECRUITS_FILE);
+const saveRecruits  = () => saveMap(recruitInfos, REDIS_RECRUITS_KEY, RECRUITS_FILE);
+const loadCooldowns = () => loadMap(REDIS_COOLDOWNS_KEY, COOLDOWNS_FILE);
+const saveCooldowns = () => saveMap(refusCooldowns, REDIS_COOLDOWNS_KEY, COOLDOWNS_FILE);
 
 // ─── STATE ────────────────────────────────────────────────────────────────────
 const ticketEtapes  = new Map();
 const ticketInfos   = new Map();
 const recruitInfos  = new Map();
+const refusCooldowns = new Map(); // userId -> timestamp du dernier refus
 // Verrous anti double-clic : empêche un membre de créer 2 contrats/candidatures
 // en soumettant le formulaire deux fois très vite (avant que le 1er ait fini).
 const enCreationContrat = new Set();
@@ -167,6 +176,9 @@ async function initState() {
   const loadedRecruits = await loadRecruits();
   recruitInfos.clear();
   for (const [channelId, info] of loadedRecruits.entries()) recruitInfos.set(channelId, info);
+  const loadedCooldowns = await loadCooldowns();
+  refusCooldowns.clear();
+  for (const [userId, ts] of loadedCooldowns.entries()) refusCooldowns.set(userId, ts);
   console.log(`✅ État chargé : ${ticketInfos.size} contrat(s), ${recruitInfos.size} recrutement(s) — stockage=${redis ? 'Upstash Redis' : 'fichiers locaux'}`);
 }
 // ──────────────────────────────────────────────────────────────────────────────
@@ -271,6 +283,32 @@ async function getContractMessage(channel, info) {
   }
 }
 
+// Journal d'audit : écrit une ligne dans le salon de logs staff.
+async function logAction(guild, description, color = 0x5865F2) {
+  try {
+    const ch = await guild.channels.fetch(CONFIG.LOG_CHANNEL_ID).catch(() => null);
+    if (ch) await ch.send({ embeds: [new EmbedBuilder().setColor(color).setDescription(description).setTimestamp()] });
+  } catch (e) {
+    console.error('⚠️ logAction:', e);
+  }
+}
+
+// Génère un transcript HTML de la conversation, l'envoie dans le salon transcripts, puis supprime le salon.
+async function archiveAndDelete(channel, guild, label) {
+  try {
+    const file = await transcripts.createTranscript(channel, {
+      limit: -1,
+      filename: `${label}-${channel.name}.html`,
+      poweredBy: false,
+    });
+    const logCh = await guild.channels.fetch(CONFIG.LOG_TRANSCRIPT_CHANNEL_ID).catch(() => null);
+    if (logCh) await logCh.send({ content: `🗒️ Transcript — ${label} : \`${channel.name}\``, files: [file] });
+  } catch (e) {
+    console.error('⚠️ archiveAndDelete (transcript):', e);
+  }
+  await channel.delete().catch(() => {});
+}
+
 // Logique partagée par les boutons ◀️/➡️ ET les commandes /back et /next.
 // sens = 'next' ou 'back'. Gère perms, garde-fous, déplacement de catégorie,
 // archivage du salon dev si TERMINE, et mise à jour de l'embed du contrat.
@@ -320,6 +358,10 @@ async function changerEtape(interaction, sens) {
   // Pour une commande, on retrouve le message du contrat via son ID stocké.
   const contractMsg = isButton ? interaction.message : await getContractMessage(channel, info);
   if (contractMsg) await contractMsg.edit({ embeds: [embed], components: [row] }).catch(() => {});
+
+  // Prévient le client de la nouvelle étape, directement dans son salon.
+  await channel.send({ content: `📢 <@${info.clientId}> — Le contrat passe à l'étape : **${CONFIG.ETAPES[cible].label}**` }).catch(() => {});
+  await logAction(interaction.guild, `➡️ Contrat **#${padNum(info.num)} — ${info.nom}** → **${CONFIG.ETAPES[cible].label}** (par <@${interaction.user.id}>)`, CONFIG.ETAPES[cible].color);
 
   if (!isButton) await interaction.editReply({ content: `✅ Étape : **${CONFIG.ETAPES[cible].label}**` });
 }
@@ -680,6 +722,7 @@ client.on('interactionCreate', async (interaction) => {
     saveTickets();
 
     await ticketChannel.send({ content: CONFIG.SECURITY_MESSAGE });
+    await logAction(guild, `🆕 Contrat **${nomProjet}** créé par <@${user.id}> — ${ticketChannel}`, 0x57F287);
 
     await interaction.editReply({ content: `✅ Ton ticket a été créé : ${ticketChannel}` });
     } finally {
@@ -769,6 +812,7 @@ client.on('interactionCreate', async (interaction) => {
       await contractMsg.edit({ embeds: [updatedEmbed], components: [buildStaffRow(0, true)] });
     }
     await channel.send({ embeds: [new EmbedBuilder().setColor(0xED4245).setDescription(`❌ Contrat **annulé** par <@${interaction.user.id}>`)] });
+    await logAction(interaction.guild, `🚫 Contrat **#${padNum(info.num)} — ${info.nom}** annulé par <@${interaction.user.id}>`, 0xED4245);
     return;
   }
 
@@ -841,15 +885,18 @@ client.on('interactionCreate', async (interaction) => {
     const channel = await interaction.guild.channels.fetch(contratChannelId).catch(() => null);
     if (!channel) return;
     const info = ticketInfos.get(channel.id);
+    const guild = interaction.guild;
 
-    const devChannel = await getDevChannel(interaction.guild, info);
-    if (devChannel) await devChannel.delete().catch(() => {});
+    await logAction(guild, `🗑️ Contrat **#${padNum(info?.num ?? channel.id)} — ${info?.nom ?? channel.name}** supprimé par <@${interaction.user.id}>`, 0xED4245);
+
+    const devChannel = await getDevChannel(guild, info);
+    if (devChannel) await archiveAndDelete(devChannel, guild, 'dev');
 
     ticketEtapes.delete(channel.id);
     ticketInfos.delete(channel.id);
     saveTickets();
-    await interaction.reply({ content: '🗑️ Suppression en cours...', ephemeral: true });
-    setTimeout(() => channel.delete().catch(() => {}), 2000);
+    await interaction.reply({ content: '🗑️ Suppression en cours... (un transcript est sauvegardé)', ephemeral: true });
+    setTimeout(() => archiveAndDelete(channel, guild, 'contrat'), 2000);
     return;
   }
 
@@ -892,8 +939,10 @@ client.on('interactionCreate', async (interaction) => {
       }
     }
 
-    await interaction.reply({ content: '🗑️ Suppression du salon dev en cours...', ephemeral: true });
-    setTimeout(() => devChannel.delete().catch(() => {}), 2000);
+    const guild = interaction.guild;
+    await logAction(guild, `🗑️ Salon dev \`${devChannel.name}\` supprimé par <@${interaction.user.id}>`, 0xED4245);
+    await interaction.reply({ content: '🗑️ Suppression du salon dev en cours... (un transcript est sauvegardé)', ephemeral: true });
+    setTimeout(() => archiveAndDelete(devChannel, guild, 'dev'), 2000);
     return;
   }
 
@@ -936,6 +985,14 @@ client.on('interactionCreate', async (interaction) => {
     }
     enCreationRecrut.add(user.id);
     try {
+
+    // Cooldown : pas de nouvelle candidature dans le mois suivant un refus.
+    const dernierRefus = refusCooldowns.get(user.id);
+    if (dernierRefus && (Date.now() - dernierRefus) < REFUS_COOLDOWN_MS) {
+      const dispoLe = Math.floor((dernierRefus + REFUS_COOLDOWN_MS) / 1000);
+      await interaction.editReply({ content: `❌ Ta candidature a été refusée récemment. Tu pourras repostuler <t:${dispoLe}:R> (le <t:${dispoLe}:D>).` });
+      return;
+    }
 
     // Anti-doublon : une seule candidature ouverte par personne (état persistant).
     for (const [chId, rec] of recruitInfos.entries()) {
@@ -987,6 +1044,7 @@ client.on('interactionCreate', async (interaction) => {
       )],
     });
 
+    await logAction(guild, `📩 Nouvelle candidature de <@${user.id}> (${typeDev}) — ${ticketChannel}`, 0x5865F2);
     await interaction.editReply({ content: `✅ Ta candidature a été ouverte : ${ticketChannel}` });
     } finally {
       enCreationRecrut.delete(user.id);
@@ -1022,10 +1080,12 @@ client.on('interactionCreate', async (interaction) => {
     const channelId = interaction.customId.replace('recrut_confirmer_suppression_', '');
     const channel   = await interaction.guild.channels.fetch(channelId).catch(() => null);
     if (!channel) return;
+    const guild = interaction.guild;
     recruitInfos.delete(channelId);
     saveRecruits();
-    await interaction.reply({ content: '🗑️ Suppression en cours...', ephemeral: true });
-    setTimeout(() => channel.delete().catch(() => {}), 2000);
+    await logAction(guild, `🗑️ Candidature \`${channel.name}\` supprimée par <@${interaction.user.id}>`, 0xED4245);
+    await interaction.reply({ content: '🗑️ Suppression en cours... (un transcript est sauvegardé)', ephemeral: true });
+    setTimeout(() => archiveAndDelete(channel, guild, 'recrutement'), 2000);
     return;
   }
 
@@ -1069,6 +1129,7 @@ client.on('interactionCreate', async (interaction) => {
         .setFooter({ text: 'HEO Studio • Recrutement' })
         .setTimestamp()],
     });
+    await logAction(interaction.guild, `🎤 Entretien proposé à <@${candidateId}> par <@${interaction.user.id}> — ${channel}`, 0x5865F2);
     return;
   }
 
@@ -1092,6 +1153,12 @@ client.on('interactionCreate', async (interaction) => {
     await channel.setName(newName).catch(() => {});
     await channel.setParent(CONFIG.RECRUTEMENT_REFUSE_ID, { lockPermissions: false }).catch(() => {});
 
+    // Démarre le cooldown anti re-candidature (1 mois) pour ce candidat.
+    const refusedId = recruitInfos.get(channel.id)?.candidateId;
+    if (refusedId) {
+      refusCooldowns.set(refusedId, Date.now());
+      saveCooldowns();
+    }
     recruitInfos.delete(channel.id);
     saveRecruits();
 
@@ -1101,6 +1168,7 @@ client.on('interactionCreate', async (interaction) => {
         .setDescription(`❌ Candidature **refusée** par <@${interaction.user.id}>`)
         .setTimestamp()],
     });
+    await logAction(interaction.guild, `❌ Candidature \`${channel.name}\` refusée par <@${interaction.user.id}>${refusedId ? ` (candidat <@${refusedId}>, cooldown 1 mois)` : ''}`, 0xED4245);
     return;
   }
 
@@ -1297,6 +1365,8 @@ client.on('interactionCreate', async (interaction) => {
       acceptEmbed.addFields({ name: '⚠️ Rôles NON attribués', value: `${rolesFailed.join('\n')}\n\n> Vérifie que le rôle du bot est **au-dessus** de ces rôles dans les paramètres du serveur, puis réattribue-les à la main.`, inline: false });
     }
     await channel.send({ content: `🎉 <@${candidateId}>`, embeds: [acceptEmbed] });
+
+    await logAction(interaction.guild, `🎉 <@${candidateId}> accepté par <@${interaction.user.id}> — ${pending.types.map(t => DEV_TYPE_ICONS[t] ?? t).join(', ')}${rolesFailed.length ? ' ⚠️ (certains rôles non attribués)' : ''}`, 0x57F287);
 
     // Renommer avec préfixe 🟢 et déplacer dans recrutement terminé
     const newName = `🟢-${channel.name.replace(/^🟢-/, '')}`;
