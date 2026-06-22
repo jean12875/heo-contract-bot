@@ -1404,16 +1404,17 @@ client.on('interactionCreate', async (interaction) => {
     const info = ticketInfos.get(channel.id);
     const guild = interaction.guild;
 
-    await logAction(guild, `🗑️ Contrat **#${padNum(info?.num ?? channel.id)} — ${info?.nom ?? channel.name}** supprimé par <@${interaction.user.id}>`, 0xED4245);
-
-    const devChannel = await getDevChannel(guild, info);
-    if (devChannel) await archiveAndDelete(devChannel, guild, 'dev');
+    // On accuse réception TOUT DE SUITE (le transcript peut être lent → éviter l'expiration des 3 s).
+    await interaction.reply({ content: '🗑️ Suppression en cours... (un transcript est sauvegardé)', ephemeral: true });
 
     ticketEtapes.delete(channel.id);
     ticketInfos.delete(channel.id);
     saveTickets();
     updateDashboard(guild);
-    await interaction.reply({ content: '🗑️ Suppression en cours... (un transcript est sauvegardé)', ephemeral: true });
+    await logAction(guild, `🗑️ Contrat **#${padNum(info?.num ?? channel.id)} — ${info?.nom ?? channel.name}** supprimé par <@${interaction.user.id}>`, 0xED4245);
+
+    const devChannel = await getDevChannel(guild, info);
+    if (devChannel) await archiveAndDelete(devChannel, guild, 'dev');
     setTimeout(() => archiveAndDelete(channel, guild, 'contrat'), 2000);
     return;
   }
