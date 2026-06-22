@@ -455,6 +455,106 @@ client.on('channelDelete', (channel) => {
   }
 });
 
+// ─── DÉPART D'UN MEMBRE ─────────────────────────────────────────────────────
+// Client parti → contrats annulés auto + ping secrétaire.
+// Dev/candidat parti → ping secrétaire + bouton supprimer (pas de suppression auto).
+client.on('guildMemberRemove', async (member) => {
+  try {
+    const guild = member.guild;
+
+    // 1) Contrats du client
+    for (const [chId, info] of ticketInfos.entries()) {
+      if (info.clientId !== member.id) continue;
+      const idx = ticketEtapes.get(chId) ?? info.etapeIndex ?? 0;
+      if (idx === -1 || CONFIG.ETAPES[idx]?.id === 'TERMINE') continue; // déjà annulé ou terminé
+
+      info.etapeAvantAnnulation = idx;
+      info.etapeIndex = -1;
+      info.clientLeft = true;
+      ticketEtapes.set(chId, -1);
+      saveTickets();
+
+      const channel = await guild.channels.fetch(chId).catch(() => null);
+      if (channel) {
+        await channel.setParent(CONFIG.CATEGORIES.ANNULE, { lockPermissions: false }).catch(() => {});
+        const contractMsg = await getContractMessage(channel, info);
+        if (contractMsg) {
+          const annEmbed = new EmbedBuilder()
+            .setTitle(`📋 Contrat #${padNum(info.num)} — ${info.nom}`)
+            .setColor(0xED4245)
+            .addFields(
+              { name: '👤 Client',      value: `<@${info.clientId}>`,    inline: true },
+              { name: '💰 Budget',      value: clip(info.budget, 256),    inline: true },
+              { name: '⏱️ Délai',       value: clip(info.delai, 256),     inline: true },
+              { name: '📝 Description', value: clip(info.description),    inline: false },
+            )
+            .setFooter({ text: 'HEO Studio • ❌ Annulé (départ du client)' })
+            .setTimestamp();
+          await contractMsg.edit({ embeds: [annEmbed], components: [buildStaffRow(0, true)] }).catch(() => {});
+        }
+        await channel.send({ content: `⚠️ <@&${CONFIG.SECRETAIRE_ROLE_ID}> Le client <@${info.clientId}> a **quitté le serveur**. Le contrat est **annulé automatiquement**. S'il revient, son accès sera rétabli et vous pourrez le désannuler.` }).catch(() => {});
+      }
+
+      const devChannel = await getDevChannel(guild, info);
+      if (devChannel) await devChannel.setParent(CONFIG.CATEGORIES.DEV_ANNULE, { lockPermissions: false }).catch(() => {});
+
+      await logAction(guild, `🚪 Client <@${info.clientId}> parti → contrat **#${padNum(info.num)} — ${info.nom}** annulé automatiquement`, 0xED4245);
+    }
+    updateDashboard(guild);
+
+    // 2) Candidatures du membre
+    for (const [chId, rec] of recruitInfos.entries()) {
+      if (rec.candidateId !== member.id) continue;
+      rec.candidateLeft = true;
+      saveRecruits();
+      const channel = await guild.channels.fetch(chId).catch(() => null);
+      if (!channel) continue;
+      await channel.send({
+        content: `⚠️ <@&${CONFIG.SECRETAIRE_ROLE_ID}> Le candidat/dev <@${rec.candidateId}> a **quitté le serveur**. La candidature est conservée au cas où il reviendrait.`,
+        components: [new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId('recrut_supprimer').setLabel('🗑️ Supprimer la candidature').setStyle(ButtonStyle.Danger),
+        )],
+      }).catch(() => {});
+      await logAction(guild, `🚪 Candidat <@${rec.candidateId}> parti — candidature \`${channel.name}\``, 0xED4245);
+    }
+  } catch (e) {
+    console.error('⚠️ guildMemberRemove:', e);
+  }
+});
+
+// ─── RETOUR D'UN MEMBRE ─────────────────────────────────────────────────────
+// Rétablit l'accès du membre revenu sur ses tickets (contrat et/ou candidature).
+client.on('guildMemberAdd', async (member) => {
+  try {
+    const guild = member.guild;
+
+    for (const [chId, info] of ticketInfos.entries()) {
+      if (info.clientId !== member.id || !info.clientLeft) continue;
+      const channel = await guild.channels.fetch(chId).catch(() => null);
+      if (channel) {
+        await channel.permissionOverwrites.edit(member.id, { ViewChannel: true, SendMessages: true, ReadMessageHistory: true }).catch(() => {});
+        await channel.send({ content: `✅ <@&${CONFIG.SECRETAIRE_ROLE_ID}> Le client <@${member.id}> est **revenu** sur le serveur. Son accès au ticket a été rétabli — vous pouvez **désannuler** le contrat si besoin.` }).catch(() => {});
+      }
+      info.clientLeft = false;
+      saveTickets();
+      await logAction(guild, `↩️ Client <@${member.id}> revenu — accès rétabli au contrat **#${padNum(info.num)} — ${info.nom}**`, 0x57F287);
+    }
+
+    for (const [chId, rec] of recruitInfos.entries()) {
+      if (rec.candidateId !== member.id || !rec.candidateLeft) continue;
+      const channel = await guild.channels.fetch(chId).catch(() => null);
+      if (channel) {
+        await channel.permissionOverwrites.edit(member.id, { ViewChannel: true, SendMessages: true, ReadMessageHistory: true }).catch(() => {});
+        await channel.send({ content: `✅ <@&${CONFIG.SECRETAIRE_ROLE_ID}> Le candidat <@${member.id}> est **revenu** sur le serveur.` }).catch(() => {});
+      }
+      rec.candidateLeft = false;
+      saveRecruits();
+    }
+  } catch (e) {
+    console.error('⚠️ guildMemberAdd:', e);
+  }
+});
+
 // ─── SLASH COMMANDS ───────────────────────────────────────────────────────────
 async function registerSlashCommands() {
   const commands = [
