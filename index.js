@@ -1241,7 +1241,7 @@ client.on('interactionCreate', async (interaction) => {
     info.etapeAvantAnnulation = etapeActuelle;
     info.etapeIndex = -1;
     saveTickets();
-    await channel.setParent(CONFIG.CATEGORIES.ANNULE, { lockPermissions: false });
+    await channel.setParent(CONFIG.CATEGORIES.ANNULE, { lockPermissions: false }).catch(() => {});
     ticketEtapes.set(channel.id, -1);
 
     // Déplacer le salon dev dans la catégorie archive annulé
@@ -1290,7 +1290,7 @@ client.on('interactionCreate', async (interaction) => {
     }
     await interaction.deferUpdate();
     const etapeRetour = info?.etapeAvantAnnulation ?? 0;
-    await channel.setParent(CONFIG.CATEGORIES[CONFIG.ETAPES[etapeRetour].id], { lockPermissions: false });
+    await channel.setParent(CONFIG.CATEGORIES[CONFIG.ETAPES[etapeRetour].id], { lockPermissions: false }).catch(() => {});
     ticketEtapes.set(channel.id, etapeRetour);
     if (info) {
       info.etapeIndex = etapeRetour;
