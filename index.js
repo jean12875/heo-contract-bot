@@ -54,14 +54,10 @@ const client = new Client({
 // ─── FILET DE SÉCURITÉ GLOBAL ───────────────────────────────────────────────
 // Empêche qu'une seule erreur non gérée fasse planter tout le bot.
 // Sans ça, un bug dans une interaction tuait le process jusqu'au redémarrage Render.
-process.on('unhandledRejection', (reason) => {
-  console.error('⚠️ unhandledRejection:', reason);
-});
-process.on('uncaughtException', (err) => {
-  console.error('⚠️ uncaughtException:', err);
-});
-client.on('error', (err) => console.error('⚠️ Erreur client Discord:', err));
-client.on('shardError', (err) => console.error('⚠️ Erreur shard Discord:', err));
+process.on('unhandledRejection', (reason) => logError('unhandledRejection', reason));
+process.on('uncaughtException', (err) => logError('uncaughtException', err));
+client.on('error', (err) => logError('client Discord', err));
+client.on('shardError', (err) => logError('shard Discord', err));
 
 // ─── CONFIG ───────────────────────────────────────────────────────────────────
 const CONFIG = {
@@ -136,6 +132,8 @@ const REDIS_TICKETS_KEY = 'heo:tickets';
 const REDIS_RECRUITS_KEY = 'heo:recruits';
 const REDIS_COOLDOWNS_KEY = 'heo:refuscooldowns';
 const REDIS_META_KEY = 'heo:meta';
+const ERRORS_FILE = './errors.json';
+const REDIS_ERRORS_KEY = 'heo:errors';
 const REFUS_COOLDOWN_MS = 30 * 24 * 60 * 60 * 1000; // 1 mois
 
 // Charge un Map persisté depuis Redis (ou un fichier local en repli).
@@ -173,12 +171,35 @@ const saveCooldowns = () => saveMap(refusCooldowns, REDIS_COOLDOWNS_KEY, COOLDOW
 const loadMeta      = () => loadMap(REDIS_META_KEY, META_FILE);
 const saveMeta      = () => saveMap(meta, REDIS_META_KEY, META_FILE);
 
+// Journal d'erreurs persistant (Upstash) — consultable via /debug même après un crash.
+function saveErrors() {
+  if (redis) { redis.set(REDIS_ERRORS_KEY, errorLog).catch(() => {}); return; }
+  try { fs.writeFileSync(ERRORS_FILE, JSON.stringify(errorLog)); } catch {}
+}
+async function loadErrors() {
+  if (redis) {
+    try { let e = await redis.get(REDIS_ERRORS_KEY); if (typeof e === 'string') e = JSON.parse(e); return Array.isArray(e) ? e : []; }
+    catch { return []; }
+  }
+  try { if (fs.existsSync(ERRORS_FILE)) return JSON.parse(fs.readFileSync(ERRORS_FILE, 'utf8')); } catch {}
+  return [];
+}
+function logError(context, err) {
+  console.error(`⚠️ ${context}:`, err);
+  try {
+    errorLog.push({ t: Date.now(), c: context, m: String(err?.stack || err?.message || err).slice(0, 600) });
+    while (errorLog.length > 50) errorLog.shift();
+    saveErrors();
+  } catch {}
+}
+
 // ─── STATE ────────────────────────────────────────────────────────────────────
 const ticketEtapes  = new Map();
 const ticketInfos   = new Map();
 const recruitInfos  = new Map();
 const refusCooldowns = new Map(); // userId -> timestamp du dernier refus
 const meta = new Map();           // divers : ex. id du message du tableau secrétaire
+const errorLog = [];              // 50 dernières erreurs, consultables via /debug
 // Verrous anti double-clic : empêche un membre de créer 2 contrats/candidatures
 // en soumettant le formulaire deux fois très vite (avant que le 1er ait fini).
 const enCreationContrat = new Set();
@@ -202,6 +223,9 @@ async function initState() {
   const loadedMeta = await loadMeta();
   meta.clear();
   for (const [k, v] of loadedMeta.entries()) meta.set(k, v);
+  const loadedErrors = await loadErrors();
+  errorLog.length = 0;
+  errorLog.push(...loadedErrors.slice(-50));
   console.log(`✅ État chargé : ${ticketInfos.size} contrat(s), ${recruitInfos.size} recrutement(s) — stockage=${redis ? 'Upstash Redis' : 'fichiers locaux'}`);
 }
 // ──────────────────────────────────────────────────────────────────────────────
@@ -745,6 +769,10 @@ async function registerSlashCommands() {
       .setDescription('Ramène le contrat de ce salon à l\'étape précédente')
       .toJSON(),
     new SlashCommandBuilder()
+      .setName('debug')
+      .setDescription('Affiche les dernières erreurs du bot (staff)')
+      .toJSON(),
+    new SlashCommandBuilder()
       .setName('paiement')
       .setDescription('Affiche les instructions de paiement dans le salon')
       .addStringOption(opt =>
@@ -877,6 +905,31 @@ client.on('interactionCreate', async (interaction) => {
   // ── /next et /back (équivalents des boutons ➡️ / ◀️) ──────────────────────────
   if (interaction.isChatInputCommand() && (interaction.commandName === 'next' || interaction.commandName === 'back')) {
     await changerEtape(interaction, interaction.commandName === 'next' ? 'next' : 'back');
+    return;
+  }
+
+  // ── /debug : affiche les dernières erreurs (staff) ────────────────────────────
+  if (interaction.isChatInputCommand() && interaction.commandName === 'debug') {
+    if (!isStaffOrAdmin(interaction.member)) {
+      await interaction.reply({ content: '❌ Réservé au staff.', ephemeral: true }); return;
+    }
+    if (errorLog.length === 0) {
+      await interaction.reply({ content: '✅ Aucune erreur enregistrée. 🎉', ephemeral: true }); return;
+    }
+    const lignes = errorLog.slice(-15).reverse().map(e =>
+      `<t:${Math.floor(e.t / 1000)}:R> — **${e.c}**\n\`\`\`${String(e.m).slice(0, 300)}\`\`\``
+    );
+    let desc = lignes.join('\n');
+    if (desc.length > 4000) desc = desc.slice(0, 4000) + '\n…';
+    await interaction.reply({
+      embeds: [new EmbedBuilder()
+        .setTitle(`🐞 Dernières erreurs (${errorLog.length} au total)`)
+        .setColor(0xED4245)
+        .setDescription(desc)
+        .setFooter({ text: 'Copie-colle ça pour le partager' })
+        .setTimestamp()],
+      ephemeral: true,
+    });
     return;
   }
 
@@ -1860,7 +1913,7 @@ client.on('interactionCreate', async (interaction) => {
   }
 
  } catch (err) {
-    console.error('⚠️ Erreur dans interactionCreate:', err);
+    logError('interactionCreate', err);
     await safeErrorReply(interaction);
   }
 });
