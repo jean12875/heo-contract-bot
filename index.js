@@ -108,31 +108,8 @@ const CONFIG = {
 // ──────────────────────────────────────────────────────────────────────────────
 
 // ─── PERSISTANCE ──────────────────────────────────────────────────────────────
-const COUNTER_FILE = './counter.json';
 const TICKETS_FILE = './tickets.json';
-const REDIS_COUNTER_KEY = 'heo:counter';
 const REDIS_TICKETS_KEY = 'heo:tickets';
-
-async function loadCounter() {
-  if (redis) {
-    try {
-      const c = await redis.get(REDIS_COUNTER_KEY);
-      return Number(c) || 0;
-    } catch (e) { console.error('⚠️ loadCounter (redis):', e); return 0; }
-  }
-  try {
-    if (fs.existsSync(COUNTER_FILE)) return JSON.parse(fs.readFileSync(COUNTER_FILE, 'utf8')).count ?? 0;
-  } catch {}
-  return 0;
-}
-
-function saveCounter(count) {
-  if (redis) {
-    redis.set(REDIS_COUNTER_KEY, count).catch(e => console.error('⚠️ saveCounter (redis):', e));
-    return;
-  }
-  try { fs.writeFileSync(COUNTER_FILE, JSON.stringify({ count })); } catch (e) { console.error('⚠️ saveCounter:', e); }
-}
 
 async function loadTickets() {
   if (redis) {
@@ -159,14 +136,12 @@ function saveTickets() {
 }
 
 // ─── STATE ────────────────────────────────────────────────────────────────────
-let contractCounter      = 0;
 const ticketEtapes       = new Map();
 const ticketInfos        = new Map();
 const pendingRecrutement = new Map();
 
-// Charge l'état (compteur + tickets) au démarrage, depuis Redis ou les fichiers.
+// Charge l'état des tickets au démarrage, depuis Redis ou les fichiers.
 async function initState() {
-  contractCounter = await loadCounter();
   const loaded = await loadTickets();
   ticketInfos.clear();
   ticketEtapes.clear();
@@ -174,7 +149,7 @@ async function initState() {
     ticketInfos.set(channelId, info);
     ticketEtapes.set(channelId, info.etapeIndex ?? 0);
   }
-  console.log(`✅ État chargé : ${ticketInfos.size} contrat(s) — compteur=${contractCounter} — stockage=${redis ? 'Upstash Redis' : 'fichiers locaux'}`);
+  console.log(`✅ État chargé : ${ticketInfos.size} contrat(s) — stockage=${redis ? 'Upstash Redis' : 'fichiers locaux'}`);
 }
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -526,13 +501,8 @@ client.on('interactionCreate', async (interaction) => {
     const guild       = interaction.guild;
     const user        = interaction.user;
 
-    contractCounter++;
-    saveCounter(contractCounter);
-    const num    = contractCounter;
-    const numStr = padNum(num);
-
     const ticketChannel = await guild.channels.create({
-      name: `${numStr}-${user.username.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 20)}`,
+      name: 'contrat',
       type: ChannelType.GuildText,
       parent: CONFIG.CATEGORIES.NEGOCIATION,
       permissionOverwrites: [
@@ -542,6 +512,11 @@ client.on('interactionCreate', async (interaction) => {
         { id: CONFIG.SECRETAIRE_ROLE_ID, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.ManageChannels] },
       ],
     });
+
+    // L'identifiant du contrat = l'ID Discord du salon (unique, plus de numéro à 4 chiffres).
+    // Le bot ne connaît l'ID qu'après la création, d'où le renommage ici.
+    const num = ticketChannel.id;
+    await ticketChannel.setName(`contrat-${num}`).catch(() => {});
 
     ticketEtapes.set(ticketChannel.id, 0);
     ticketInfos.set(ticketChannel.id, { num, nom: nomProjet, description, budget, delai, clientId: user.id, etapeIndex: 0 });
