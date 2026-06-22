@@ -368,6 +368,100 @@ client.on('messageDelete', (msg) => {
   } catch {}
 });
 
+// ─── DÉPART D'UN MEMBRE : helpers partagés (événement temps réel + réconciliation) ──
+// Annule un contrat car son client n'est plus là (suppose le contrat actif).
+async function annulerContratDepartClient(guild, chId, info) {
+  info.etapeAvantAnnulation = ticketEtapes.get(chId) ?? info.etapeIndex ?? 0;
+  info.etapeIndex = -1;
+  info.clientLeft = true;
+  ticketEtapes.set(chId, -1);
+  saveTickets();
+
+  const channel = await guild.channels.fetch(chId).catch(() => null);
+  if (channel) {
+    await channel.setParent(CONFIG.CATEGORIES.ANNULE, { lockPermissions: false }).catch(() => {});
+    const contractMsg = await getContractMessage(channel, info);
+    if (contractMsg) {
+      const annEmbed = new EmbedBuilder()
+        .setTitle(`📋 Contrat #${padNum(info.num)} — ${info.nom}`)
+        .setColor(0xED4245)
+        .addFields(
+          { name: '👤 Client',      value: `<@${info.clientId}>`,    inline: true },
+          { name: '💰 Budget',      value: clip(info.budget, 256),    inline: true },
+          { name: '⏱️ Délai',       value: clip(info.delai, 256),     inline: true },
+          { name: '📝 Description', value: clip(info.description),    inline: false },
+        )
+        .setFooter({ text: 'HEO Studio • ❌ Annulé (départ du client)' })
+        .setTimestamp();
+      await contractMsg.edit({ embeds: [annEmbed], components: [buildStaffRow(0, true)] }).catch(() => {});
+    }
+    await channel.send({ content: `⚠️ <@&${CONFIG.SECRETAIRE_ROLE_ID}> Le client <@${info.clientId}> a **quitté le serveur**. Le contrat est **annulé automatiquement**. S'il revient, son accès sera rétabli et vous pourrez le désannuler.` }).catch(() => {});
+  }
+  const devChannel = await getDevChannel(guild, info);
+  if (devChannel) await devChannel.setParent(CONFIG.CATEGORIES.DEV_ANNULE, { lockPermissions: false }).catch(() => {});
+  await logAction(guild, `🚪 Client <@${info.clientId}> parti → contrat **#${padNum(info.num)} — ${info.nom}** annulé automatiquement`, 0xED4245);
+}
+
+// Signale au staff qu'un candidat est parti (avec bouton supprimer, pas de suppression auto).
+async function signalerDepartDev(guild, chId, rec) {
+  rec.candidateLeft = true;
+  saveRecruits();
+  const channel = await guild.channels.fetch(chId).catch(() => null);
+  if (!channel) return;
+  await channel.send({
+    content: `⚠️ <@&${CONFIG.SECRETAIRE_ROLE_ID}> Le candidat/dev <@${rec.candidateId}> a **quitté le serveur**. La candidature est conservée au cas où il reviendrait.`,
+    components: [new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('recrut_supprimer').setLabel('🗑️ Supprimer la candidature').setStyle(ButtonStyle.Danger),
+    )],
+  }).catch(() => {});
+  await logAction(guild, `🚪 Candidat <@${rec.candidateId}> parti — candidature \`${channel.name}\``, 0xED4245);
+}
+
+// Au démarrage : rattrape les départs survenus pendant que le bot était hors-ligne.
+async function reconcilierMembres(guild) {
+  try {
+    for (const [chId, info] of ticketInfos.entries()) {
+      const idx = ticketEtapes.get(chId) ?? info.etapeIndex ?? 0;
+      if (idx === -1 || CONFIG.ETAPES[idx]?.id === 'TERMINE') continue;
+      const m = await guild.members.fetch(info.clientId).catch(() => null);
+      if (!m) await annulerContratDepartClient(guild, chId, info);
+    }
+    for (const [chId, rec] of recruitInfos.entries()) {
+      if (rec.candidateLeft) continue;
+      const m = await guild.members.fetch(rec.candidateId).catch(() => null);
+      if (!m) await signalerDepartDev(guild, chId, rec);
+    }
+    updateDashboard(guild);
+  } catch (e) {
+    console.error('⚠️ reconcilierMembres:', e);
+  }
+}
+
+// Relance : ping secrétaire + client si un contrat actif est inactif depuis 3 jours.
+const INACTIVITE_MS = 3 * 24 * 60 * 60 * 1000;
+async function verifierInactivite() {
+  try {
+    const guild = client.guilds.cache.get(CONFIG.GUILD_ID) || await client.guilds.fetch(CONFIG.GUILD_ID).catch(() => null);
+    if (!guild) return;
+    for (const [chId, info] of ticketInfos.entries()) {
+      const idx = ticketEtapes.get(chId) ?? info.etapeIndex ?? 0;
+      if (idx === -1 || CONFIG.ETAPES[idx]?.id === 'TERMINE') continue; // sauf annulé/terminé
+      const channel = await guild.channels.fetch(chId).catch(() => null);
+      if (!channel) continue;
+      const msgs = await channel.messages.fetch({ limit: 1 }).catch(() => null);
+      const lastTs = msgs?.first()?.createdTimestamp ?? 0;
+      const dejaRelance = Date.now() - (info.lastReminder ?? 0) < INACTIVITE_MS;
+      if (Date.now() - lastTs > INACTIVITE_MS && !dejaRelance) {
+        await channel.send({ content: `⏰ <@&${CONFIG.SECRETAIRE_ROLE_ID}> <@${info.clientId}> — Ce contrat est **inactif depuis plus de 3 jours**. Un point sur l'avancement ?` }).catch(() => {});
+        info.lastReminder = Date.now();
+        saveTickets();
+      }
+    }
+  } catch (e) {
+    console.error('⚠️ verifierInactivite:', e);
+  }
+}
+
 // Logique partagée par les boutons ◀️/➡️ ET les commandes /back et /next.
 // sens = 'next' ou 'back'. Gère perms, garde-fous, déplacement de catégorie,
 // archivage du salon dev si TERMINE, et mise à jour de l'embed du contrat.
@@ -431,9 +525,15 @@ client.once('ready', async () => {
   console.log(`✅ Connecté en tant que ${client.user.tag}`);
   await initState();
   await registerSlashCommands();
-  // Rafraîchit le tableau secrétaire au démarrage.
+  // Rafraîchit le tableau + rattrape les départs manqués pendant l'arrêt.
   const g = await client.guilds.fetch(CONFIG.GUILD_ID).catch(() => null);
-  if (g) updateDashboard(g);
+  if (g) {
+    updateDashboard(g);
+    reconcilierMembres(g);
+  }
+  // Relances d'inactivité : un passage ~1 min après le boot, puis toutes les 6 h.
+  setTimeout(verifierInactivite, 60 * 1000);
+  setInterval(verifierInactivite, 6 * 60 * 60 * 1000);
 });
 
 // ─── NETTOYAGE AUTO ─────────────────────────────────────────────────────────────
@@ -461,61 +561,16 @@ client.on('channelDelete', (channel) => {
 client.on('guildMemberRemove', async (member) => {
   try {
     const guild = member.guild;
-
-    // 1) Contrats du client
     for (const [chId, info] of ticketInfos.entries()) {
       if (info.clientId !== member.id) continue;
       const idx = ticketEtapes.get(chId) ?? info.etapeIndex ?? 0;
-      if (idx === -1 || CONFIG.ETAPES[idx]?.id === 'TERMINE') continue; // déjà annulé ou terminé
-
-      info.etapeAvantAnnulation = idx;
-      info.etapeIndex = -1;
-      info.clientLeft = true;
-      ticketEtapes.set(chId, -1);
-      saveTickets();
-
-      const channel = await guild.channels.fetch(chId).catch(() => null);
-      if (channel) {
-        await channel.setParent(CONFIG.CATEGORIES.ANNULE, { lockPermissions: false }).catch(() => {});
-        const contractMsg = await getContractMessage(channel, info);
-        if (contractMsg) {
-          const annEmbed = new EmbedBuilder()
-            .setTitle(`📋 Contrat #${padNum(info.num)} — ${info.nom}`)
-            .setColor(0xED4245)
-            .addFields(
-              { name: '👤 Client',      value: `<@${info.clientId}>`,    inline: true },
-              { name: '💰 Budget',      value: clip(info.budget, 256),    inline: true },
-              { name: '⏱️ Délai',       value: clip(info.delai, 256),     inline: true },
-              { name: '📝 Description', value: clip(info.description),    inline: false },
-            )
-            .setFooter({ text: 'HEO Studio • ❌ Annulé (départ du client)' })
-            .setTimestamp();
-          await contractMsg.edit({ embeds: [annEmbed], components: [buildStaffRow(0, true)] }).catch(() => {});
-        }
-        await channel.send({ content: `⚠️ <@&${CONFIG.SECRETAIRE_ROLE_ID}> Le client <@${info.clientId}> a **quitté le serveur**. Le contrat est **annulé automatiquement**. S'il revient, son accès sera rétabli et vous pourrez le désannuler.` }).catch(() => {});
-      }
-
-      const devChannel = await getDevChannel(guild, info);
-      if (devChannel) await devChannel.setParent(CONFIG.CATEGORIES.DEV_ANNULE, { lockPermissions: false }).catch(() => {});
-
-      await logAction(guild, `🚪 Client <@${info.clientId}> parti → contrat **#${padNum(info.num)} — ${info.nom}** annulé automatiquement`, 0xED4245);
+      if (idx === -1 || CONFIG.ETAPES[idx]?.id === 'TERMINE') continue;
+      await annulerContratDepartClient(guild, chId, info);
     }
     updateDashboard(guild);
-
-    // 2) Candidatures du membre
     for (const [chId, rec] of recruitInfos.entries()) {
       if (rec.candidateId !== member.id) continue;
-      rec.candidateLeft = true;
-      saveRecruits();
-      const channel = await guild.channels.fetch(chId).catch(() => null);
-      if (!channel) continue;
-      await channel.send({
-        content: `⚠️ <@&${CONFIG.SECRETAIRE_ROLE_ID}> Le candidat/dev <@${rec.candidateId}> a **quitté le serveur**. La candidature est conservée au cas où il reviendrait.`,
-        components: [new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setCustomId('recrut_supprimer').setLabel('🗑️ Supprimer la candidature').setStyle(ButtonStyle.Danger),
-        )],
-      }).catch(() => {});
-      await logAction(guild, `🚪 Candidat <@${rec.candidateId}> parti — candidature \`${channel.name}\``, 0xED4245);
+      await signalerDepartDev(guild, chId, rec);
     }
   } catch (e) {
     console.error('⚠️ guildMemberRemove:', e);
@@ -575,12 +630,30 @@ async function registerSlashCommands() {
       .setDescription('Ramène le contrat de ce salon à l\'étape précédente')
       .toJSON(),
     new SlashCommandBuilder()
+      .setName('paiement')
+      .setDescription('Affiche les instructions de paiement dans le salon')
+      .addStringOption(opt =>
+        opt.setName('m')
+          .setDescription('Méthode de paiement')
+          .setRequired(true)
+          .addChoices(
+            { name: 'Revolut', value: 'revolut' },
+            { name: 'Roblox (gamepass)', value: 'roblox' },
+          )
+      )
+      .addStringOption(opt =>
+        opt.setName('l')
+          .setDescription('Lien du gamepass (requis pour Roblox)')
+          .setRequired(false)
+      )
+      .toJSON(),
+    new SlashCommandBuilder()
       .setName('assign')
       .setDescription('Créer ou mettre à jour le salon dev pour un contrat')
       .addStringOption(opt =>
         opt.setName('id_contrat')
-          .setDescription('ID Discord du salon contrat')
-          .setRequired(true)
+          .setDescription('ID du salon contrat (laisse vide pour utiliser le salon actuel)')
+          .setRequired(false)
       )
       .addUserOption(opt => opt.setName('p1').setDescription('Dev 1').setRequired(true))
       .addUserOption(opt => opt.setName('p2').setDescription('Dev 2').setRequired(false))
@@ -692,6 +765,52 @@ client.on('interactionCreate', async (interaction) => {
     return;
   }
 
+  // ── /paiement ─────────────────────────────────────────────────────────────────
+  if (interaction.isChatInputCommand() && interaction.commandName === 'paiement') {
+    if (!isStaffOrAdmin(interaction.member)) {
+      await interaction.reply({ content: '❌ Réservé au staff.', ephemeral: true }); return;
+    }
+    const methode = interaction.options.getString('m');
+    const lien    = interaction.options.getString('l');
+
+    if (methode === 'revolut') {
+      await interaction.reply({
+        embeds: [new EmbedBuilder()
+          .setTitle('💳 Paiement par Revolut')
+          .setColor(0x5865F2)
+          .setDescription(
+            'Pour régler ton contrat :\n\n' +
+            '**1.** Rends-toi sur 👉 https://revolut.me/heostudio\n' +
+            '**2.** Tu peux payer par **carte bancaire**, **Revolut** ou **Apple Pay**.\n' +
+            '**3.** Entre **exactement la somme convenue**.\n' +
+            '**4.** Effectue le paiement, puis **envoie une capture d\'écran ici** pour confirmer. ✅'
+          )
+          .setFooter({ text: 'HEO Studio • Paiement' })],
+      });
+      return;
+    }
+
+    if (methode === 'roblox') {
+      if (!lien) {
+        await interaction.reply({ content: '⚠️ Pour Roblox, ajoute le lien du gamepass : `/paiement m:roblox l:<lien>`.', ephemeral: true }); return;
+      }
+      await interaction.reply({
+        embeds: [new EmbedBuilder()
+          .setTitle('🎮 Paiement par Roblox (Gamepass)')
+          .setColor(0x57F287)
+          .setDescription(
+            'Pour régler ton contrat :\n\n' +
+            `**1.** Ouvre le gamepass 👉 ${lien}\n` +
+            '**2.** Achète-le au **montant convenu**.\n' +
+            '**3.** **Envoie une capture d\'écran** de l\'objet possédé dans ton **inventaire** — cela confirme le paiement. ✅'
+          )
+          .setFooter({ text: 'HEO Studio • Paiement' })],
+      });
+      return;
+    }
+    return;
+  }
+
   // ── /assign ──────────────────────────────────────────────────────────────────
   if (interaction.isChatInputCommand() && interaction.commandName === 'assign') {
     if (!isStaffOrAdmin(interaction.member)) {
@@ -699,7 +818,8 @@ client.on('interactionCreate', async (interaction) => {
     }
     await interaction.deferReply({ ephemeral: true });
 
-    const contratChannelId = interaction.options.getString('id_contrat');
+    // ID fourni, sinon on prend le salon où la commande est lancée.
+    const contratChannelId = interaction.options.getString('id_contrat') || interaction.channelId;
     const guild = interaction.guild;
 
     let contratChannel;
