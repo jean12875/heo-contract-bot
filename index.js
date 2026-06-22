@@ -1552,10 +1552,10 @@ client.on('interactionCreate', async (interaction) => {
     await interaction.deferUpdate();
     await interaction.message.delete().catch(() => {});
 
-    const rows = [];
-    for (const type of pending.types) {
+    // Une rangée de sélection par type retenu.
+    const selectRows = pending.types.map((type) => {
       const label = DEV_TYPE_ICONS[type] ?? type;
-      rows.push(new ActionRowBuilder().addComponents(
+      return new ActionRowBuilder().addComponents(
         new StringSelectMenuBuilder()
           .setCustomId(`recrut_etoiles_${type}`)
           .setPlaceholder(`Niveau pour ${label}...`)
@@ -1566,18 +1566,24 @@ client.on('interactionCreate', async (interaction) => {
             new StringSelectMenuOptionBuilder().setLabel('⭐⭐ — 2 étoiles').setValue('3'),
             new StringSelectMenuOptionBuilder().setLabel('⭐ — 1 étoile').setValue('4'),
           )
-      ));
-    }
-    rows.push(new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId('recrut_etoiles_valider').setLabel('✅ Confirmer et attribuer les rôles').setStyle(ButtonStyle.Success),
-    ));
+      );
+    });
 
+    const etape2Embed = new EmbedBuilder()
+      .setTitle('✅ Candidature acceptée — Étape 2/2')
+      .setDescription(`Types retenus : **${pending.types.map(t => DEV_TYPE_ICONS[t] ?? t).join(', ')}**\n\nChoisis le **niveau (étoiles)** pour chaque type.`)
+      .setColor(0x57F287);
+
+    // Discord limite à 5 rangées par message : on envoie les menus par paquets de 5,
+    // puis le bouton de confirmation dans un message séparé.
+    for (let i = 0; i < selectRows.length; i += 5) {
+      const chunk = selectRows.slice(i, i + 5);
+      await channel.send({ ...(i === 0 ? { embeds: [etape2Embed] } : {}), components: chunk });
+    }
     await channel.send({
-      embeds: [new EmbedBuilder()
-        .setTitle('✅ Candidature acceptée — Étape 2/2')
-        .setDescription(`Types retenus : **${pending.types.map(t => DEV_TYPE_ICONS[t] ?? t).join(', ')}**\n\nChoisis le **niveau (étoiles)** pour chaque type.`)
-        .setColor(0x57F287)],
-      components: rows,
+      components: [new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('recrut_etoiles_valider').setLabel('✅ Confirmer et attribuer les rôles').setStyle(ButtonStyle.Success),
+      )],
     });
     return;
   }
