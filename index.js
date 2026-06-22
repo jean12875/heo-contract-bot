@@ -100,7 +100,7 @@ const CONFIG = {
     ui:           ['1485321773665751141','1485321825834766587','1485321711158038841','1485321660138524763','1485320858624065757'],
     builder:      ['1485322061994786918','1485321763985293392','1485321427845648385','1485321015721591024','1485320049073061952'],
     animateur:    ['1488587193932058654','1488587312269885590','1488587339105308752','1488587372319871197','1488587400518041612'],
-    scripteur:    ['1485321122646851735','1485321178859180165','1485321077495300298','1485321012709953717','1488194696831307776'],
+    scripteur:    ['1485321122646851735','1485321178859180165','1485321077495300298','1485321012709953717','1485320795868631092'],
     modelisateur: ['1496427405462605854','1496427628897243345','1496427675437371462','1496427717342793879','1496427769217679450'],
     designer:     ['1496429816365322260','1496429980912058408','1496430030610366504','1496430076038742156','1496430128396501052'],
   },
@@ -109,38 +109,47 @@ const CONFIG = {
 
 // ─── PERSISTANCE ──────────────────────────────────────────────────────────────
 const TICKETS_FILE = './tickets.json';
+const RECRUITS_FILE = './recruits.json';
 const REDIS_TICKETS_KEY = 'heo:tickets';
+const REDIS_RECRUITS_KEY = 'heo:recruits';
 
-async function loadTickets() {
+// Charge un Map persisté depuis Redis (ou un fichier local en repli).
+async function loadMap(redisKey, file) {
   if (redis) {
     try {
-      let obj = await redis.get(REDIS_TICKETS_KEY);
+      let obj = await redis.get(redisKey);
       if (typeof obj === 'string') obj = JSON.parse(obj);
       return new Map(Object.entries(obj || {}));
-    } catch (e) { console.error('⚠️ loadTickets (redis):', e); return new Map(); }
+    } catch (e) { console.error(`⚠️ load ${redisKey} (redis):`, e); return new Map(); }
   }
   try {
-    if (fs.existsSync(TICKETS_FILE)) return new Map(Object.entries(JSON.parse(fs.readFileSync(TICKETS_FILE, 'utf8'))));
+    if (fs.existsSync(file)) return new Map(Object.entries(JSON.parse(fs.readFileSync(file, 'utf8'))));
   } catch {}
   return new Map();
 }
 
-function saveTickets() {
+// Sauvegarde un Map vers Redis (ou un fichier local en repli).
+function saveMap(map, redisKey, file) {
   const obj = {};
-  for (const [k, v] of ticketInfos.entries()) obj[k] = v;
+  for (const [k, v] of map.entries()) obj[k] = v;
   if (redis) {
-    redis.set(REDIS_TICKETS_KEY, obj).catch(e => console.error('⚠️ saveTickets (redis):', e));
+    redis.set(redisKey, obj).catch(e => console.error(`⚠️ save ${redisKey} (redis):`, e));
     return;
   }
-  try { fs.writeFileSync(TICKETS_FILE, JSON.stringify(obj)); } catch (e) { console.error('⚠️ saveTickets:', e); }
+  try { fs.writeFileSync(file, JSON.stringify(obj)); } catch (e) { console.error(`⚠️ save ${file}:`, e); }
 }
 
-// ─── STATE ────────────────────────────────────────────────────────────────────
-const ticketEtapes       = new Map();
-const ticketInfos        = new Map();
-const pendingRecrutement = new Map();
+const loadTickets  = () => loadMap(REDIS_TICKETS_KEY, TICKETS_FILE);
+const saveTickets  = () => saveMap(ticketInfos, REDIS_TICKETS_KEY, TICKETS_FILE);
+const loadRecruits = () => loadMap(REDIS_RECRUITS_KEY, RECRUITS_FILE);
+const saveRecruits = () => saveMap(recruitInfos, REDIS_RECRUITS_KEY, RECRUITS_FILE);
 
-// Charge l'état des tickets au démarrage, depuis Redis ou les fichiers.
+// ─── STATE ────────────────────────────────────────────────────────────────────
+const ticketEtapes  = new Map();
+const ticketInfos   = new Map();
+const recruitInfos  = new Map();
+
+// Charge l'état (contrats + recrutements) au démarrage, depuis Redis ou les fichiers.
 async function initState() {
   const loaded = await loadTickets();
   ticketInfos.clear();
@@ -149,7 +158,10 @@ async function initState() {
     ticketInfos.set(channelId, info);
     ticketEtapes.set(channelId, info.etapeIndex ?? 0);
   }
-  console.log(`✅ État chargé : ${ticketInfos.size} contrat(s) — stockage=${redis ? 'Upstash Redis' : 'fichiers locaux'}`);
+  const loadedRecruits = await loadRecruits();
+  recruitInfos.clear();
+  for (const [channelId, info] of loadedRecruits.entries()) recruitInfos.set(channelId, info);
+  console.log(`✅ État chargé : ${ticketInfos.size} contrat(s), ${recruitInfos.size} recrutement(s) — stockage=${redis ? 'Upstash Redis' : 'fichiers locaux'}`);
 }
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -247,6 +259,25 @@ client.once('ready', async () => {
   console.log(`✅ Connecté en tant que ${client.user.tag}`);
   await initState();
   await registerSlashCommands();
+});
+
+// ─── NETTOYAGE AUTO ─────────────────────────────────────────────────────────────
+// Quand un salon est supprimé (même à la main), on retire les entrées associées
+// pour éviter les données fantômes qui s'accumulent.
+client.on('channelDelete', (channel) => {
+  try {
+    const id = channel.id;
+    let changedTickets = false;
+    if (ticketInfos.has(id)) { ticketInfos.delete(id); ticketEtapes.delete(id); changedTickets = true; }
+    // Si c'était un salon dev, on retire la référence dans le contrat parent.
+    for (const info of ticketInfos.values()) {
+      if (info.devChannelId === id) { info.devChannelId = null; changedTickets = true; }
+    }
+    if (changedTickets) saveTickets();
+    if (recruitInfos.has(id)) { recruitInfos.delete(id); saveRecruits(); }
+  } catch (e) {
+    console.error('⚠️ channelDelete:', e);
+  }
 });
 
 // ─── SLASH COMMANDS ───────────────────────────────────────────────────────────
@@ -412,17 +443,16 @@ client.on('interactionCreate', async (interaction) => {
     }
 
     if (devChannel) {
-      // Mise à jour des permissions
-      for (const [id] of devChannel.permissionOverwrites.cache) {
-        await devChannel.permissionOverwrites.delete(id).catch(() => {});
-      }
-      await devChannel.permissionOverwrites.edit(guild.roles.everyone, { ViewChannel: false });
-      for (const roleId of [CONFIG.STAFF_ROLE_ID, CONFIG.SECRETAIRE_ROLE_ID]) {
-        await devChannel.permissionOverwrites.edit(roleId, { ViewChannel: true, SendMessages: true, ReadMessageHistory: true, ManageChannels: true }).catch(() => {});
-      }
-      for (const u of devUsers) {
-        await devChannel.permissionOverwrites.edit(u.id, { ViewChannel: true, SendMessages: true, ReadMessageHistory: true }).catch(() => {});
-      }
+      // Remplace toutes les permissions en UNE fois (atomique : aucun instant de visibilité).
+      await devChannel.permissionOverwrites.set([
+        { id: guild.roles.everyone,      deny:  [PermissionFlagsBits.ViewChannel] },
+        { id: CONFIG.STAFF_ROLE_ID,      allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.ManageChannels] },
+        { id: CONFIG.SECRETAIRE_ROLE_ID, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.ManageChannels] },
+        ...devUsers.map(u => ({
+          id: u.id,
+          allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory],
+        })),
+      ]).catch(() => {});
       await devChannel.send({
         content: devUsers.map(u => `<@${u.id}>`).join(' '),
         embeds: [new EmbedBuilder()
@@ -500,6 +530,23 @@ client.on('interactionCreate', async (interaction) => {
     const delai       = interaction.fields.getTextInputValue('delai') || 'Non précisé';
     const guild       = interaction.guild;
     const user        = interaction.user;
+
+    // 1 seul contrat actif par client (on ignore les annulés et les terminés).
+    for (const [chId, info] of ticketInfos.entries()) {
+      if (info.clientId !== user.id) continue;
+      const etapeIdx = ticketEtapes.get(chId) ?? 0;
+      const estActif = etapeIdx !== -1 && CONFIG.ETAPES[etapeIdx]?.id !== 'TERMINE';
+      if (!estActif) continue;
+      const existingCh = guild.channels.cache.get(chId);
+      if (existingCh) {
+        await interaction.editReply({ content: `❌ Tu as déjà un contrat en cours : ${existingCh}\nTermine-le ou attends qu'il soit clôturé avant d'en ouvrir un nouveau.` });
+        return;
+      }
+      // Salon disparu : entrée orpheline, on nettoie.
+      ticketInfos.delete(chId);
+      ticketEtapes.delete(chId);
+      saveTickets();
+    }
 
     const ticketChannel = await guild.channels.create({
       name: 'contrat',
@@ -818,12 +865,17 @@ client.on('interactionCreate', async (interaction) => {
     const user          = interaction.user;
     const guild         = interaction.guild;
 
-    const existing = guild.channels.cache.find(c =>
-      c.name === `recrut-${user.username.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 20)}` &&
-      c.type === ChannelType.GuildText
-    );
-    if (existing) {
-      await interaction.editReply({ content: `❌ Tu as déjà une candidature ouverte : ${existing}` }); return;
+    // Anti-doublon : une seule candidature ouverte par personne (état persistant).
+    for (const [chId, rec] of recruitInfos.entries()) {
+      if (rec.candidateId === user.id) {
+        const existingCh = guild.channels.cache.get(chId);
+        if (existingCh) {
+          await interaction.editReply({ content: `❌ Tu as déjà une candidature ouverte : ${existingCh}` }); return;
+        }
+        // Le salon n'existe plus : on nettoie l'entrée orpheline.
+        recruitInfos.delete(chId);
+        saveRecruits();
+      }
     }
 
     const ticketChannel = await guild.channels.create({
@@ -837,6 +889,10 @@ client.on('interactionCreate', async (interaction) => {
         { id: CONFIG.SECRETAIRE_ROLE_ID, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.ManageChannels] },
       ],
     });
+
+    // Mémorise le candidat dès l'ouverture (plus besoin de relire l'embed plus tard).
+    recruitInfos.set(ticketChannel.id, { candidateId: user.id, typeDev, disponibilite, paiement });
+    saveRecruits();
 
     await ticketChannel.send({
       content: `👋 <@${user.id}> | <@&${CONFIG.STAFF_ROLE_ID}>`,
@@ -887,7 +943,8 @@ client.on('interactionCreate', async (interaction) => {
     const channelId = interaction.customId.replace('recrut_confirmer_suppression_', '');
     const channel   = await interaction.guild.channels.fetch(channelId).catch(() => null);
     if (!channel) return;
-    pendingRecrutement.delete(channelId);
+    recruitInfos.delete(channelId);
+    saveRecruits();
     await interaction.reply({ content: '🗑️ Suppression en cours...', ephemeral: true });
     setTimeout(() => channel.delete().catch(() => {}), 2000);
     return;
@@ -912,6 +969,9 @@ client.on('interactionCreate', async (interaction) => {
     const newName = `🔴-${channel.name.replace(/^🔴-/, '')}`;
     await channel.setName(newName).catch(() => {});
     await channel.setParent(CONFIG.RECRUTEMENT_REFUSE_ID, { lockPermissions: false }).catch(() => {});
+
+    recruitInfos.delete(channel.id);
+    saveRecruits();
 
     await channel.send({
       embeds: [new EmbedBuilder()
@@ -969,9 +1029,10 @@ client.on('interactionCreate', async (interaction) => {
   // ── Select : types retenus ────────────────────────────────────────────────────
   if (interaction.isStringSelectMenu() && interaction.customId === 'recrut_select_types') {
     const channel  = interaction.channel;
-    const existing = pendingRecrutement.get(channel.id) ?? {};
+    const existing = recruitInfos.get(channel.id) ?? {};
     existing.types = interaction.values;
-    pendingRecrutement.set(channel.id, existing);
+    recruitInfos.set(channel.id, existing);
+    saveRecruits();
     await interaction.deferUpdate();
     return;
   }
@@ -982,7 +1043,7 @@ client.on('interactionCreate', async (interaction) => {
       await interaction.reply({ content: '❌ Réservé au staff.', ephemeral: true }); return;
     }
     const channel = interaction.channel;
-    const pending = pendingRecrutement.get(channel.id);
+    const pending = recruitInfos.get(channel.id);
     if (!pending?.types?.length) {
       await interaction.reply({ content: '⚠️ Sélectionne au moins un type de dev.', ephemeral: true }); return;
     }
@@ -1023,10 +1084,11 @@ client.on('interactionCreate', async (interaction) => {
   if (interaction.isStringSelectMenu() && interaction.customId.startsWith('recrut_etoiles_')) {
     const type    = interaction.customId.replace('recrut_etoiles_', '');
     const channel = interaction.channel;
-    const pending = pendingRecrutement.get(channel.id) ?? {};
+    const pending = recruitInfos.get(channel.id) ?? {};
     if (!pending.etoiles) pending.etoiles = {};
     pending.etoiles[type] = interaction.values[0];
-    pendingRecrutement.set(channel.id, pending);
+    recruitInfos.set(channel.id, pending);
+    saveRecruits();
     await interaction.deferUpdate();
     return;
   }
@@ -1038,7 +1100,7 @@ client.on('interactionCreate', async (interaction) => {
     }
     await interaction.deferUpdate();
     const channel = interaction.channel;
-    const pending = pendingRecrutement.get(channel.id);
+    const pending = recruitInfos.get(channel.id);
 
     if (!pending?.types?.length || !pending?.etoiles) {
       await interaction.followUp({ content: '⚠️ Données manquantes, recommence.', ephemeral: true }); return;
@@ -1049,12 +1111,15 @@ client.on('interactionCreate', async (interaction) => {
       }
     }
 
-    // Retrouver le candidat depuis l'embed
-    const messages    = await channel.messages.fetch({ limit: 30 });
-    const embedMsg    = messages.find(m => m.author.id === client.user.id && m.embeds?.[0]?.title?.startsWith('📩 Candidature'));
-    const candidateId = embedMsg?.embeds?.[0]?.fields?.find(f => f.name === '👤 Candidat')?.value?.replace(/[<@>]/g, '');
+    // Candidat mémorisé à l'ouverture (avec repli sur l'embed si jamais absent).
+    let candidateId = pending.candidateId;
     if (!candidateId) {
-      await interaction.followUp({ content: '❌ Impossible de retrouver le candidat dans l\'embed.', ephemeral: true }); return;
+      const messages = await channel.messages.fetch({ limit: 50 });
+      const embedMsg = messages.find(m => m.author.id === client.user.id && m.embeds?.[0]?.title?.startsWith('📩 Candidature'));
+      candidateId = embedMsg?.embeds?.[0]?.fields?.find(f => f.name === '👤 Candidat')?.value?.replace(/[<@>]/g, '');
+    }
+    if (!candidateId) {
+      await interaction.followUp({ content: '❌ Impossible de retrouver le candidat.', ephemeral: true }); return;
     }
 
     const guild           = interaction.guild;
@@ -1080,7 +1145,8 @@ client.on('interactionCreate', async (interaction) => {
       if (starRoleId) { await candidateMember.roles.add(starRoleId).catch(() => {}); rolesAdded.push(`<@&${starRoleId}>`); }
     }
 
-    pendingRecrutement.delete(channel.id);
+    recruitInfos.delete(channel.id);
+    saveRecruits();
     await interaction.message.delete().catch(() => {});
 
     const typesLabel = pending.types.map(t => {
