@@ -74,6 +74,7 @@ const CONFIG = {
   LOG_CHANNEL_ID:            '1518537607481397379',
   LOG_TRANSCRIPT_CHANNEL_ID: '1518537756526121030',
   DASHBOARD_CHANNEL_ID:      '1518540506483654716',
+  ANNUAIRE_CHANNEL_ID:       '1518573444395044924',
 
   CATEGORIES: {
     NEGOCIATION:   '1487848273355210803',
@@ -225,6 +226,9 @@ function clip(text, max = 1024) {
   return str.length > max ? str.slice(0, max - 1) + '…' : str;
 }
 
+// Libellé du champ montant : « Budget » (estimation client) → « Prix » (coût convenu, après modif).
+const prixLabel = (info) => (info?.priceConfirmed ? '💰 Prix' : '💰 Budget');
+
 function isStaffOrAdmin(member) {
   if (!member?.roles?.cache) return false;
   return member.roles.cache.has(CONFIG.STAFF_ROLE_ID) ||
@@ -234,14 +238,14 @@ function isStaffOrAdmin(member) {
 
 // ─── HELPERS ──────────────────────────────────────────────────────────────────
 
-function buildEmbed(num, nom, description, budget, delai, user, etapeIndex) {
+function buildEmbed(num, nom, description, budget, delai, user, etapeIndex, budgetLabel = '💰 Budget') {
   const etape = CONFIG.ETAPES[etapeIndex];
   return new EmbedBuilder()
     .setTitle(`📋 Contrat #${padNum(num)} — ${nom}`)
     .setColor(etape.color)
     .addFields(
       { name: '👤 Client',      value: `<@${user.id}>`,    inline: true },
-      { name: '💰 Budget',      value: clip(budget, 256),   inline: true },
+      { name: budgetLabel,      value: clip(budget, 256),   inline: true },
       { name: '⏱️ Délai',       value: clip(delai, 256),    inline: true },
       { name: '📝 Description', value: clip(description),   inline: false },
     )
@@ -263,6 +267,7 @@ function buildStaffRow(etapeIndex, annule = false) {
   return new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('etape_precedente').setLabel('◀️').setStyle(ButtonStyle.Secondary).setDisabled(isFirst),
     new ButtonBuilder().setCustomId('etape_suivante').setLabel(isLast ? '✅ Terminé' : `➡️ ${CONFIG.ETAPES[etapeIndex + 1]?.label ?? 'Fin'}`).setStyle(isLast ? ButtonStyle.Success : ButtonStyle.Primary).setDisabled(isLast),
+    new ButtonBuilder().setCustomId('modifier_contrat').setLabel('✏️ Modifier').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('annuler_contrat').setLabel('🚫 Annuler').setStyle(ButtonStyle.Danger),
     new ButtonBuilder().setCustomId('supprimer_ticket').setLabel('🗑️ Supprimer').setStyle(ButtonStyle.Secondary),
   );
@@ -370,7 +375,70 @@ async function updateDashboard(guild) {
   }
 }
 
-// Recrée le tableau s'il est supprimé manuellement.
+// ─── ANNUAIRE DES DEVS ──────────────────────────────────────────────────────
+// Renvoie les étoiles d'un membre pour un type donné (ETOILES_ROLES[type] : index 0 = 5★).
+function etoilesPour(member, type) {
+  const arr = CONFIG.ETOILES_ROLES[type] || [];
+  for (let i = 0; i < arr.length; i++) {
+    if (member.roles.cache.has(arr[i])) return '⭐'.repeat(5 - i);
+  }
+  return '';
+}
+
+// Met à jour l'annuaire : un embed total + un embed par type de dev (avec compteur).
+async function updateAnnuaire(guild) {
+  try {
+    if (!guild) return;
+    const ch = await guild.channels.fetch(CONFIG.ANNUAIRE_CHANNEL_ID).catch(() => null);
+    if (!ch) return;
+    await guild.members.fetch().catch(() => {}); // best effort pour peupler le cache
+
+    const distinct = new Set();
+    const typeEmbeds = [];
+    for (const [type, roleId] of Object.entries(CONFIG.DEV_ROLES)) {
+      const membres = guild.members.cache.filter(m => m.roles.cache.has(roleId));
+      const lines = [];
+      for (const m of membres.values()) {
+        distinct.add(m.id);
+        const stars = etoilesPour(m, type);
+        lines.push(`<@${m.id}>${stars ? ` — ${stars}` : ''}`);
+      }
+      let desc = lines.join('\n') || '*Personne pour l\'instant*';
+      if (desc.length > 900) desc = desc.slice(0, 900) + '\n…';
+      typeEmbeds.push(new EmbedBuilder()
+        .setColor(0x5865F2)
+        .setTitle(`${DEV_TYPE_ICONS[type] ?? type} (${membres.size})`)
+        .setDescription(desc));
+    }
+    const topEmbed = new EmbedBuilder()
+      .setColor(0x57F287)
+      .setTitle(`👥 Équipe développement HEO — ${distinct.size} dev(s)`)
+      .setDescription('Annuaire mis à jour automatiquement. Les devs multi-rôles apparaissent dans chaque type mais ne sont comptés qu\'une fois dans le total.')
+      .setTimestamp();
+    const embeds = [topEmbed, ...typeEmbeds];
+
+    const msgId = meta.get('annuaireMsgId');
+    let msg = msgId ? await ch.messages.fetch(msgId).catch(() => null) : null;
+    if (msg) {
+      await msg.edit({ embeds });
+    } else {
+      const sent = await ch.send({ embeds });
+      meta.set('annuaireMsgId', sent.id);
+      saveMeta();
+    }
+  } catch (e) {
+    console.error('⚠️ updateAnnuaire:', e);
+  }
+}
+
+// Débounce : regroupe les mises à jour rapprochées (changements de rôles en rafale).
+let annuaireTimer = null;
+function planifierAnnuaire(guild) {
+  if (annuaireTimer) return;
+  annuaireTimer = setTimeout(() => { annuaireTimer = null; updateAnnuaire(guild); }, 15 * 1000);
+}
+
+// Recrée le tableau / l'annuaire s'ils sont supprimés manuellement.
 client.on('messageDelete', (msg) => {
   try {
     if (msg?.id && meta.get('dashboardMsgId') === msg.id) {
@@ -378,6 +446,18 @@ client.on('messageDelete', (msg) => {
       saveMeta();
       if (msg.guild) updateDashboard(msg.guild);
     }
+    if (msg?.id && meta.get('annuaireMsgId') === msg.id) {
+      meta.delete('annuaireMsgId');
+      saveMeta();
+      if (msg.guild) updateAnnuaire(msg.guild);
+    }
+  } catch {}
+});
+
+// Met à jour l'annuaire quand les rôles d'un membre changent (même à la main).
+client.on('guildMemberUpdate', (oldM, newM) => {
+  try {
+    if (oldM.roles.cache.size !== newM.roles.cache.size) planifierAnnuaire(newM.guild);
   } catch {}
 });
 
@@ -400,7 +480,7 @@ async function annulerContratDepartClient(guild, chId, info) {
         .setColor(0xED4245)
         .addFields(
           { name: '👤 Client',      value: `<@${info.clientId}>`,    inline: true },
-          { name: '💰 Budget',      value: clip(info.budget, 256),    inline: true },
+          { name: prixLabel(info),  value: clip(info.budget, 256),    inline: true },
           { name: '⏱️ Délai',       value: clip(info.delai, 256),     inline: true },
           { name: '📝 Description', value: clip(info.description),    inline: false },
         )
@@ -522,9 +602,21 @@ async function changerEtape(interaction, sens) {
           .setTimestamp()],
       }).catch(() => {});
     }
+    // Proposition de pourboire au client (totalement optionnel).
+    await channel.send({
+      content: `🎉 <@${info.clientId}>`,
+      embeds: [new EmbedBuilder()
+        .setColor(0x57F287)
+        .setTitle('🎉 Projet terminé — merci !')
+        .setDescription(
+          'Merci pour ta confiance ! Ton projet est terminé. 💛\n\n' +
+          'Si tu es satisfait et que tu souhaites soutenir l\'équipe, tu peux laisser un **pourboire** (totalement optionnel) via 👉 https://revolut.me/heostudio'
+        )
+        .setFooter({ text: 'HEO Studio' })],
+    }).catch(() => {});
   }
 
-  const embed = buildEmbed(info.num, info.nom, info.description, info.budget, info.delai, { id: info.clientId }, cible);
+  const embed = buildEmbed(info.num, info.nom, info.description, info.budget, info.delai, { id: info.clientId }, cible, prixLabel(info));
   const row   = buildStaffRow(cible);
   // Pour un bouton, le message à éditer EST celui qui porte le bouton.
   // Pour une commande, on retrouve le message du contrat via son ID stocké.
@@ -548,11 +640,13 @@ client.once('ready', async () => {
   const g = await client.guilds.fetch(CONFIG.GUILD_ID).catch(() => null);
   if (g) {
     updateDashboard(g);
+    updateAnnuaire(g);
     reconcilierMembres(g);
   }
-  // Relances d'inactivité : un passage ~1 min après le boot, puis toutes les 6 h.
+  // Relances d'inactivité + rafraîchissement annuaire : passage après le boot, puis toutes les 6 h.
   setTimeout(verifierInactivite, 60 * 1000);
   setInterval(verifierInactivite, 6 * 60 * 60 * 1000);
+  setInterval(() => { const gg = client.guilds.cache.get(CONFIG.GUILD_ID); if (gg) updateAnnuaire(gg); }, 6 * 60 * 60 * 1000);
 });
 
 // ─── NETTOYAGE AUTO ─────────────────────────────────────────────────────────────
@@ -591,6 +685,7 @@ client.on('guildMemberRemove', async (member) => {
       if (rec.candidateId !== member.id) continue;
       await signalerDepartDev(guild, chId, rec);
     }
+    planifierAnnuaire(guild);
   } catch (e) {
     console.error('⚠️ guildMemberRemove:', e);
   }
@@ -624,6 +719,7 @@ client.on('guildMemberAdd', async (member) => {
       rec.candidateLeft = false;
       saveRecruits();
     }
+    planifierAnnuaire(guild);
   } catch (e) {
     console.error('⚠️ guildMemberAdd:', e);
   }
@@ -965,6 +1061,55 @@ client.on('interactionCreate', async (interaction) => {
     return;
   }
 
+  // ── Modifier un contrat (secrétaire uniquement) ───────────────────────────────
+  if (interaction.isButton() && interaction.customId === 'modifier_contrat') {
+    if (!interaction.member?.roles?.cache?.has(CONFIG.SECRETAIRE_ROLE_ID)) {
+      await interaction.reply({ content: '❌ Seuls les secrétaires peuvent modifier un contrat.', ephemeral: true }); return;
+    }
+    const info = ticketInfos.get(interaction.channel.id);
+    if (!info) {
+      await interaction.reply({ content: '⚠️ Ce salon n\'est pas un contrat reconnu par le bot.', ephemeral: true }); return;
+    }
+    const delaiVal = (info.delai && info.delai !== 'Non précisé') ? String(info.delai).slice(0, 100) : '';
+    const modal = new ModalBuilder().setCustomId('modal_modifier').setTitle('Modifier le contrat').addComponents(
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('nom_projet').setLabel('Nom du projet').setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(100).setValue(String(info.nom ?? '').slice(0, 100))),
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('description').setLabel('Description du projet').setStyle(TextInputStyle.Paragraph).setRequired(true).setMaxLength(1000).setValue(String(info.description ?? '').slice(0, 1000))),
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('prix').setLabel('Prix (coût convenu)').setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(100).setValue(String(info.budget ?? '').slice(0, 100))),
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('delai').setLabel('Délai').setStyle(TextInputStyle.Short).setRequired(false).setMaxLength(100).setValue(delaiVal)),
+    );
+    await interaction.showModal(modal);
+    return;
+  }
+
+  // ── Modal modification soumis ─────────────────────────────────────────────────
+  if (interaction.isModalSubmit() && interaction.customId === 'modal_modifier') {
+    await interaction.deferReply({ ephemeral: true });
+    const channel = interaction.channel;
+    const info    = ticketInfos.get(channel.id);
+    if (!info) {
+      await interaction.editReply({ content: '⚠️ Contrat introuvable.' }); return;
+    }
+    info.nom         = interaction.fields.getTextInputValue('nom_projet');
+    info.description = interaction.fields.getTextInputValue('description');
+    info.budget      = interaction.fields.getTextInputValue('prix');
+    info.delai       = interaction.fields.getTextInputValue('delai') || 'Non précisé';
+    info.priceConfirmed = true; // le champ « Budget » devient « Prix »
+    saveTickets();
+
+    const etapeIndex  = ticketEtapes.get(channel.id) ?? info.etapeIndex ?? 0;
+    const contractMsg = await getContractMessage(channel, info);
+    if (contractMsg && etapeIndex !== -1) {
+      await contractMsg.edit({
+        embeds: [buildEmbed(info.num, info.nom, info.description, info.budget, info.delai, { id: info.clientId }, etapeIndex, prixLabel(info))],
+        components: [buildStaffRow(etapeIndex)],
+      }).catch(() => {});
+    }
+    await logAction(interaction.guild, `✏️ Contrat **#${padNum(info.num)} — ${info.nom}** modifié par <@${interaction.user.id}> (prix : ${info.budget})`, 0x5865F2);
+    updateDashboard(interaction.guild);
+    await interaction.editReply({ content: '✅ Contrat mis à jour.' });
+    return;
+  }
+
   // ── Modal contrat soumis ──────────────────────────────────────────────────────
   if (interaction.isModalSubmit() && interaction.customId === 'modal_contrat') {
     await interaction.deferReply({ ephemeral: true });
@@ -1014,7 +1159,15 @@ client.on('interactionCreate', async (interaction) => {
     // L'identifiant du contrat = l'ID Discord du salon (unique, plus de numéro à 4 chiffres).
     // Le bot ne connaît l'ID qu'après la création, d'où le renommage ici.
     const num = ticketChannel.id;
-    await ticketChannel.setName(`contrat-${num}`).catch(() => {});
+    // Renommage avec une 2e tentative : les renommages Discord sont limités en débit
+    // et échouaient parfois silencieusement (le salon restait nommé « contrat »).
+    try {
+      await ticketChannel.setName(`contrat-${num}`);
+    } catch (e1) {
+      console.error('⚠️ rename contrat (tentative 1):', e1?.message || e1);
+      await new Promise(r => setTimeout(r, 2500));
+      await ticketChannel.setName(`contrat-${num}`).catch(e2 => console.error('⚠️ rename contrat (échec):', e2?.message || e2));
+    }
 
     ticketEtapes.set(ticketChannel.id, 0);
     ticketInfos.set(ticketChannel.id, { num, nom: nomProjet, description, budget, delai, clientId: user.id, etapeIndex: 0 });
@@ -1108,7 +1261,7 @@ client.on('interactionCreate', async (interaction) => {
       .setColor(0xED4245)
       .addFields(
         { name: '👤 Client', value: `<@${info.clientId}>`,    inline: true },
-        { name: '💰 Budget', value: clip(info.budget, 256),    inline: true },
+        { name: prixLabel(info), value: clip(info.budget, 256), inline: true },
         { name: '⏱️ Délai',  value: clip(info.delai, 256),     inline: true },
         { name: '📝 Description', value: clip(info.description), inline: false },
       )
@@ -1160,7 +1313,7 @@ client.on('interactionCreate', async (interaction) => {
 
     const baseEmbed = interaction.message.embeds?.[0]
       ? EmbedBuilder.from(interaction.message.embeds[0])
-      : buildEmbed(info.num, info.nom, info.description, info.budget, info.delai, { id: info.clientId }, etapeRetour);
+      : buildEmbed(info.num, info.nom, info.description, info.budget, info.delai, { id: info.clientId }, etapeRetour, prixLabel(info));
     const restoredEmbed = baseEmbed
       .setColor(etape.color)
       .setFooter({ text: `HEO Studio • Étape : ${etape.label}` });
@@ -1355,6 +1508,18 @@ client.on('interactionCreate', async (interaction) => {
         new ButtonBuilder().setCustomId('recrut_supprimer').setLabel('🗑️ Supprimer').setStyle(ButtonStyle.Secondary),
       )],
     });
+
+    await ticketChannel.send({
+      content: `📂 <@${user.id}>`,
+      embeds: [new EmbedBuilder()
+        .setColor(0x5865F2)
+        .setTitle('📂 Montre-nous tes réalisations')
+        .setDescription(
+          'Pour évaluer ton niveau, envoie ici tes **réalisations** : images, vidéos, liens (portfolio, jeux Roblox, modèles 3D, scripts...).\n\n' +
+          'Plus tu en montres, mieux on pourra juger ton profil. 😉'
+        )
+        .setFooter({ text: 'HEO Studio • Recrutement' })],
+    }).catch(() => {});
 
     await logAction(guild, `📩 Nouvelle candidature de <@${user.id}> (${typeDev}) — ${ticketChannel}`, 0x5865F2);
     await interaction.editReply({ content: `✅ Ta candidature a été ouverte : ${ticketChannel}` });
@@ -1690,6 +1855,7 @@ client.on('interactionCreate', async (interaction) => {
     const newName = `🟢-${channel.name.replace(/^🟢-/, '')}`;
     await channel.setName(newName).catch(() => {});
     await channel.setParent(CONFIG.RECRUTEMENT_TERMINE_ID, { lockPermissions: false }).catch(() => {});
+    planifierAnnuaire(guild);
     return;
   }
 
