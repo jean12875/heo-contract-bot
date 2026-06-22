@@ -60,6 +60,7 @@ const CONFIG = {
   SECRETAIRE_ROLE_ID: '1490464910549712937',
   LOG_CHANNEL_ID:            '1518537607481397379',
   LOG_TRANSCRIPT_CHANNEL_ID: '1518537756526121030',
+  DASHBOARD_CHANNEL_ID:      '1518540506483654716',
 
   CATEGORIES: {
     NEGOCIATION:   '1487848273355210803',
@@ -116,9 +117,11 @@ const CONFIG = {
 const TICKETS_FILE = './tickets.json';
 const RECRUITS_FILE = './recruits.json';
 const COOLDOWNS_FILE = './cooldowns.json';
+const META_FILE = './meta.json';
 const REDIS_TICKETS_KEY = 'heo:tickets';
 const REDIS_RECRUITS_KEY = 'heo:recruits';
 const REDIS_COOLDOWNS_KEY = 'heo:refuscooldowns';
+const REDIS_META_KEY = 'heo:meta';
 const REFUS_COOLDOWN_MS = 30 * 24 * 60 * 60 * 1000; // 1 mois
 
 // Charge un Map persisté depuis Redis (ou un fichier local en repli).
@@ -153,12 +156,15 @@ const loadRecruits  = () => loadMap(REDIS_RECRUITS_KEY, RECRUITS_FILE);
 const saveRecruits  = () => saveMap(recruitInfos, REDIS_RECRUITS_KEY, RECRUITS_FILE);
 const loadCooldowns = () => loadMap(REDIS_COOLDOWNS_KEY, COOLDOWNS_FILE);
 const saveCooldowns = () => saveMap(refusCooldowns, REDIS_COOLDOWNS_KEY, COOLDOWNS_FILE);
+const loadMeta      = () => loadMap(REDIS_META_KEY, META_FILE);
+const saveMeta      = () => saveMap(meta, REDIS_META_KEY, META_FILE);
 
 // ─── STATE ────────────────────────────────────────────────────────────────────
 const ticketEtapes  = new Map();
 const ticketInfos   = new Map();
 const recruitInfos  = new Map();
 const refusCooldowns = new Map(); // userId -> timestamp du dernier refus
+const meta = new Map();           // divers : ex. id du message du tableau secrétaire
 // Verrous anti double-clic : empêche un membre de créer 2 contrats/candidatures
 // en soumettant le formulaire deux fois très vite (avant que le 1er ait fini).
 const enCreationContrat = new Set();
@@ -179,6 +185,9 @@ async function initState() {
   const loadedCooldowns = await loadCooldowns();
   refusCooldowns.clear();
   for (const [userId, ts] of loadedCooldowns.entries()) refusCooldowns.set(userId, ts);
+  const loadedMeta = await loadMeta();
+  meta.clear();
+  for (const [k, v] of loadedMeta.entries()) meta.set(k, v);
   console.log(`✅ État chargé : ${ticketInfos.size} contrat(s), ${recruitInfos.size} recrutement(s) — stockage=${redis ? 'Upstash Redis' : 'fichiers locaux'}`);
 }
 // ──────────────────────────────────────────────────────────────────────────────
@@ -309,6 +318,56 @@ async function archiveAndDelete(channel, guild, label) {
   await channel.delete().catch(() => {});
 }
 
+// ─── TABLEAU SECRÉTAIRE ─────────────────────────────────────────────────────
+// Un message unique (1 embed par étape active) listant les contrats, recréé s'il manque.
+async function updateDashboard(guild) {
+  try {
+    if (!guild) return;
+    const ch = await guild.channels.fetch(CONFIG.DASHBOARD_CHANNEL_ID).catch(() => null);
+    if (!ch) return;
+
+    const embeds = [];
+    for (let i = 0; i < CONFIG.ETAPES.length; i++) {
+      const etape = CONFIG.ETAPES[i];
+      if (etape.id === 'TERMINE') continue; // ni terminé ni annulé dans le tableau
+      const lines = [];
+      for (const [chId, info] of ticketInfos.entries()) {
+        const idx = ticketEtapes.get(chId) ?? info.etapeIndex ?? 0;
+        if (idx !== i) continue;
+        let line = `<#${chId}> — 👤 <@${info.clientId}>`;
+        if (info.devChannelId) line += ` — 🛠️ <#${info.devChannelId}>`;
+        lines.push(line);
+      }
+      let desc = lines.join('\n') || '*Aucun contrat*';
+      if (desc.length > 1400) desc = desc.slice(0, 1400) + '\n… et d\'autres';
+      embeds.push(new EmbedBuilder().setColor(etape.color).setTitle(`${etape.label} (${lines.length})`).setDescription(desc));
+    }
+
+    const msgId = meta.get('dashboardMsgId');
+    let msg = msgId ? await ch.messages.fetch(msgId).catch(() => null) : null;
+    if (msg) {
+      await msg.edit({ embeds });
+    } else {
+      const sent = await ch.send({ embeds });
+      meta.set('dashboardMsgId', sent.id);
+      saveMeta();
+    }
+  } catch (e) {
+    console.error('⚠️ updateDashboard:', e);
+  }
+}
+
+// Recrée le tableau s'il est supprimé manuellement.
+client.on('messageDelete', (msg) => {
+  try {
+    if (msg?.id && meta.get('dashboardMsgId') === msg.id) {
+      meta.delete('dashboardMsgId');
+      saveMeta();
+      if (msg.guild) updateDashboard(msg.guild);
+    }
+  } catch {}
+});
+
 // Logique partagée par les boutons ◀️/➡️ ET les commandes /back et /next.
 // sens = 'next' ou 'back'. Gère perms, garde-fous, déplacement de catégorie,
 // archivage du salon dev si TERMINE, et mise à jour de l'embed du contrat.
@@ -362,6 +421,7 @@ async function changerEtape(interaction, sens) {
   // Prévient le client de la nouvelle étape, directement dans son salon.
   await channel.send({ content: `📢 <@${info.clientId}> — Le contrat passe à l'étape : **${CONFIG.ETAPES[cible].label}**` }).catch(() => {});
   await logAction(interaction.guild, `➡️ Contrat **#${padNum(info.num)} — ${info.nom}** → **${CONFIG.ETAPES[cible].label}** (par <@${interaction.user.id}>)`, CONFIG.ETAPES[cible].color);
+  updateDashboard(interaction.guild);
 
   if (!isButton) await interaction.editReply({ content: `✅ Étape : **${CONFIG.ETAPES[cible].label}**` });
 }
@@ -371,6 +431,9 @@ client.once('ready', async () => {
   console.log(`✅ Connecté en tant que ${client.user.tag}`);
   await initState();
   await registerSlashCommands();
+  // Rafraîchit le tableau secrétaire au démarrage.
+  const g = await client.guilds.fetch(CONFIG.GUILD_ID).catch(() => null);
+  if (g) updateDashboard(g);
 });
 
 // ─── NETTOYAGE AUTO ─────────────────────────────────────────────────────────────
@@ -385,7 +448,7 @@ client.on('channelDelete', (channel) => {
     for (const info of ticketInfos.values()) {
       if (info.devChannelId === id) { info.devChannelId = null; changedTickets = true; }
     }
-    if (changedTickets) saveTickets();
+    if (changedTickets) { saveTickets(); if (channel.guild) updateDashboard(channel.guild); }
     if (recruitInfos.has(id)) { recruitInfos.delete(id); saveRecruits(); }
   } catch (e) {
     console.error('⚠️ channelDelete:', e);
@@ -606,6 +669,7 @@ client.on('interactionCreate', async (interaction) => {
       // Sauvegarde l'ID du salon dev
       info.devChannelId = devChannel.id;
       saveTickets();
+      updateDashboard(guild);
 
       await interaction.editReply({ content: `✅ Salon ${devChannel} mis à jour avec ${devUsers.length} dev(s).` });
     } else {
@@ -640,6 +704,7 @@ client.on('interactionCreate', async (interaction) => {
       // Sauvegarde l'ID du salon dev
       info.devChannelId = devChannel.id;
       saveTickets();
+      updateDashboard(guild);
 
       await interaction.editReply({ content: `✅ Salon ${devChannel} créé pour le contrat #${numStr} avec ${devUsers.length} dev(s).` });
     }
@@ -723,6 +788,7 @@ client.on('interactionCreate', async (interaction) => {
 
     await ticketChannel.send({ content: CONFIG.SECURITY_MESSAGE });
     await logAction(guild, `🆕 Contrat **${nomProjet}** créé par <@${user.id}> — ${ticketChannel}`, 0x57F287);
+    updateDashboard(guild);
 
     await interaction.editReply({ content: `✅ Ton ticket a été créé : ${ticketChannel}` });
     } finally {
@@ -813,6 +879,7 @@ client.on('interactionCreate', async (interaction) => {
     }
     await channel.send({ embeds: [new EmbedBuilder().setColor(0xED4245).setDescription(`❌ Contrat **annulé** par <@${interaction.user.id}>`)] });
     await logAction(interaction.guild, `🚫 Contrat **#${padNum(info.num)} — ${info.nom}** annulé par <@${interaction.user.id}>`, 0xED4245);
+    updateDashboard(interaction.guild);
     return;
   }
 
@@ -857,6 +924,8 @@ client.on('interactionCreate', async (interaction) => {
       .setFooter({ text: `HEO Studio • Étape : ${etape.label}` });
     await interaction.message.edit({ embeds: [restoredEmbed], components: [buildStaffRow(etapeRetour)] });
     await channel.send({ embeds: [new EmbedBuilder().setColor(etape.color).setDescription(`↩️ Contrat **désannulé** par <@${interaction.user.id}>\nRetour à l'étape : **${etape.label}**`)] });
+    await logAction(interaction.guild, `↩️ Contrat **#${padNum(info.num)} — ${info.nom}** désannulé par <@${interaction.user.id}> → **${etape.label}**`, etape.color);
+    updateDashboard(interaction.guild);
     return;
   }
 
@@ -895,6 +964,7 @@ client.on('interactionCreate', async (interaction) => {
     ticketEtapes.delete(channel.id);
     ticketInfos.delete(channel.id);
     saveTickets();
+    updateDashboard(guild);
     await interaction.reply({ content: '🗑️ Suppression en cours... (un transcript est sauvegardé)', ephemeral: true });
     setTimeout(() => archiveAndDelete(channel, guild, 'contrat'), 2000);
     return;
