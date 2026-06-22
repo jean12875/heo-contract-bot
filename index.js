@@ -24,6 +24,18 @@ const client = new Client({
   partials: [Partials.Channel],
 });
 
+// ─── FILET DE SÉCURITÉ GLOBAL ───────────────────────────────────────────────
+// Empêche qu'une seule erreur non gérée fasse planter tout le bot.
+// Sans ça, un bug dans une interaction tuait le process jusqu'au redémarrage Render.
+process.on('unhandledRejection', (reason) => {
+  console.error('⚠️ unhandledRejection:', reason);
+});
+process.on('uncaughtException', (err) => {
+  console.error('⚠️ uncaughtException:', err);
+});
+client.on('error', (err) => console.error('⚠️ Erreur client Discord:', err));
+client.on('shardError', (err) => console.error('⚠️ Erreur shard Discord:', err));
+
 // ─── CONFIG ───────────────────────────────────────────────────────────────────
 const CONFIG = {
   TOKEN:              process.env.TOKEN,
@@ -137,6 +149,13 @@ function padNum(n) {
   return String(n).padStart(4, '0');
 }
 
+// Garantit qu'une valeur de champ d'embed ne dépasse jamais la limite Discord (1024).
+// Filet de sécurité pour les données déjà enregistrées avant l'ajout des setMaxLength.
+function clip(text, max = 1024) {
+  const str = String(text ?? '');
+  return str.length > max ? str.slice(0, max - 1) + '…' : str;
+}
+
 function isStaffOrAdmin(member) {
   return member.roles.cache.has(CONFIG.STAFF_ROLE_ID) ||
     member.roles.cache.has(CONFIG.SECRETAIRE_ROLE_ID) ||
@@ -151,10 +170,10 @@ function buildEmbed(num, nom, description, budget, delai, user, etapeIndex) {
     .setTitle(`📋 Contrat #${padNum(num)} — ${nom}`)
     .setColor(etape.color)
     .addFields(
-      { name: '👤 Client',      value: `<@${user.id}>`, inline: true },
-      { name: '💰 Budget',      value: budget,           inline: true },
-      { name: '⏱️ Délai',       value: delai,            inline: true },
-      { name: '📝 Description', value: description,      inline: false },
+      { name: '👤 Client',      value: `<@${user.id}>`,    inline: true },
+      { name: '💰 Budget',      value: clip(budget, 256),   inline: true },
+      { name: '⏱️ Délai',       value: clip(delai, 256),    inline: true },
+      { name: '📝 Description', value: clip(description),   inline: false },
     )
     .setFooter({ text: `HEO Studio • Étape : ${etape.label}` })
     .setTimestamp();
@@ -279,7 +298,21 @@ if (process.argv[2] === 'setup') {
 }
 
 // ─── INTERACTIONS ─────────────────────────────────────────────────────────────
+
+// Répond à une interaction de manière sûre, même si elle a déjà été deferred/replied.
+async function safeErrorReply(interaction) {
+  const msg = '❌ Une erreur est survenue. Réessaie, et si ça persiste préviens le staff.';
+  try {
+    if (interaction.deferred || interaction.replied) {
+      await interaction.followUp({ content: msg, ephemeral: true });
+    } else if (interaction.isRepliable?.()) {
+      await interaction.reply({ content: msg, ephemeral: true });
+    }
+  } catch {}
+}
+
 client.on('interactionCreate', async (interaction) => {
+ try {
 
   // ── /contrats ────────────────────────────────────────────────────────────────
   if (interaction.isChatInputCommand() && interaction.commandName === 'contrats') {
@@ -431,10 +464,10 @@ client.on('interactionCreate', async (interaction) => {
   if (interaction.isButton() && interaction.customId === 'creer_contrat') {
     const modal = new ModalBuilder().setCustomId('modal_contrat').setTitle('Nouvelle demande de contrat');
     modal.addComponents(
-      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('nom_projet').setLabel('Nom du projet').setStyle(TextInputStyle.Short).setPlaceholder('Ex: Jeu Roblox RPG, Site vitrine...').setRequired(true)),
-      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('description').setLabel('Description du projet').setStyle(TextInputStyle.Paragraph).setPlaceholder('Décris ce que tu veux qu\'on réalise...').setRequired(true)),
-      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('budget').setLabel('Budget estimé (en Robux ou €)').setStyle(TextInputStyle.Short).setPlaceholder('Ex: 5000 Robux, 50€...').setRequired(true)),
-      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('delai').setLabel('Délai souhaité').setStyle(TextInputStyle.Short).setPlaceholder('Ex: 2 semaines, 1 mois...').setRequired(false)),
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('nom_projet').setLabel('Nom du projet').setStyle(TextInputStyle.Short).setPlaceholder('Ex: Jeu Roblox RPG, Site vitrine...').setRequired(true).setMaxLength(100)),
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('description').setLabel('Description du projet').setStyle(TextInputStyle.Paragraph).setPlaceholder('Décris ce que tu veux qu\'on réalise...').setRequired(true).setMaxLength(1000)),
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('budget').setLabel('Budget estimé (en Robux ou €)').setStyle(TextInputStyle.Short).setPlaceholder('Ex: 5000 Robux, 50€...').setRequired(true).setMaxLength(100)),
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('delai').setLabel('Délai souhaité').setStyle(TextInputStyle.Short).setPlaceholder('Ex: 2 semaines, 1 mois...').setRequired(false).setMaxLength(100)),
     );
     await interaction.showModal(modal);
     return;
@@ -494,10 +527,13 @@ client.on('interactionCreate', async (interaction) => {
     const etapeActuelle   = ticketEtapes.get(channel.id) ?? 0;
     const etapePrecedente = etapeActuelle - 1;
     if (etapePrecedente < 0) { await interaction.reply({ content: '⚠️ Déjà à la première étape.', ephemeral: true }); return; }
+    const info = ticketInfos.get(channel.id);
+    if (!info) {
+      await interaction.reply({ content: '⚠️ Ce contrat n\'est plus reconnu par le bot (données perdues après un redémarrage). Crée un nouveau ticket ou contacte un admin.', ephemeral: true }); return;
+    }
     await interaction.deferUpdate();
     await channel.setParent(CONFIG.CATEGORIES[CONFIG.ETAPES[etapePrecedente].id], { lockPermissions: false });
     ticketEtapes.set(channel.id, etapePrecedente);
-    const info = ticketInfos.get(channel.id);
     info.etapeIndex = etapePrecedente;
     saveTickets();
     const clientUser = await client.users.fetch(info.clientId);
@@ -514,10 +550,13 @@ client.on('interactionCreate', async (interaction) => {
     const etapeActuelle = ticketEtapes.get(channel.id) ?? 0;
     const nouvelleEtape = etapeActuelle + 1;
     if (nouvelleEtape >= CONFIG.ETAPES.length) { await interaction.reply({ content: '✅ Déjà à l\'étape finale.', ephemeral: true }); return; }
+    const info = ticketInfos.get(channel.id);
+    if (!info) {
+      await interaction.reply({ content: '⚠️ Ce contrat n\'est plus reconnu par le bot (données perdues après un redémarrage). Crée un nouveau ticket ou contacte un admin.', ephemeral: true }); return;
+    }
     await interaction.deferUpdate();
     await channel.setParent(CONFIG.CATEGORIES[CONFIG.ETAPES[nouvelleEtape].id], { lockPermissions: false });
     ticketEtapes.set(channel.id, nouvelleEtape);
-    const info = ticketInfos.get(channel.id);
     info.etapeIndex = nouvelleEtape;
     saveTickets();
 
@@ -568,11 +607,12 @@ client.on('interactionCreate', async (interaction) => {
     if (!channel) { console.error('confirmer_annulation: salon introuvable', contratChannelId); return; }
     const etapeActuelle = ticketEtapes.get(channel.id) ?? 0;
     const info          = ticketInfos.get(channel.id);
-    if (info) {
-      info.etapeAvantAnnulation = etapeActuelle;
-      info.etapeIndex = -1;
-      saveTickets();
+    if (!info) {
+      await interaction.followUp({ content: '⚠️ Ce contrat n\'est plus reconnu par le bot (données perdues après un redémarrage). Tu peux supprimer ce salon manuellement.', ephemeral: true }); return;
     }
+    info.etapeAvantAnnulation = etapeActuelle;
+    info.etapeIndex = -1;
+    saveTickets();
     await channel.setParent(CONFIG.CATEGORIES.ANNULE, { lockPermissions: false });
     ticketEtapes.set(channel.id, -1);
 
@@ -592,10 +632,10 @@ client.on('interactionCreate', async (interaction) => {
       .setTitle(`📋 Contrat #${padNum(info.num)} — ${info.nom}`)
       .setColor(0xED4245)
       .addFields(
-        { name: '👤 Client', value: `<@${info.clientId}>`, inline: true },
-        { name: '💰 Budget', value: info.budget,            inline: true },
-        { name: '⏱️ Délai',  value: info.delai,             inline: true },
-        { name: '📝 Description', value: info.description,  inline: false },
+        { name: '👤 Client', value: `<@${info.clientId}>`,    inline: true },
+        { name: '💰 Budget', value: clip(info.budget, 256),    inline: true },
+        { name: '⏱️ Délai',  value: clip(info.delai, 256),     inline: true },
+        { name: '📝 Description', value: clip(info.description), inline: false },
       )
       .setFooter({ text: 'HEO Studio • ❌ Contrat annulé' })
       .setTimestamp();
@@ -613,9 +653,12 @@ client.on('interactionCreate', async (interaction) => {
     if (!isStaffOrAdmin(interaction.member)) {
       await interaction.reply({ content: '❌ Réservé au staff.', ephemeral: true }); return;
     }
-    await interaction.deferUpdate();
     const channel     = interaction.channel;
     const info        = ticketInfos.get(channel.id);
+    if (!info) {
+      await interaction.reply({ content: '⚠️ Ce contrat n\'est plus reconnu par le bot (données perdues après un redémarrage).', ephemeral: true }); return;
+    }
+    await interaction.deferUpdate();
     const etapeRetour = info?.etapeAvantAnnulation ?? 0;
     await channel.setParent(CONFIG.CATEGORIES[CONFIG.ETAPES[etapeRetour].id], { lockPermissions: false });
     ticketEtapes.set(channel.id, etapeRetour);
@@ -638,7 +681,10 @@ client.on('interactionCreate', async (interaction) => {
       });
     }
 
-    const restoredEmbed = EmbedBuilder.from(interaction.message.embeds[0])
+    const baseEmbed = interaction.message.embeds?.[0]
+      ? EmbedBuilder.from(interaction.message.embeds[0])
+      : buildEmbed(info.num, info.nom, info.description, info.budget, info.delai, { id: info.clientId }, etapeRetour);
+    const restoredEmbed = baseEmbed
       .setColor(etape.color)
       .setFooter({ text: `HEO Studio • Étape : ${etape.label}` });
     await interaction.message.edit({ embeds: [restoredEmbed], components: [buildStaffRow(etapeRetour)] });
@@ -732,13 +778,13 @@ client.on('interactionCreate', async (interaction) => {
       .setTitle('📩 Candidature Dev — HEO Studio');
     modal.addComponents(
       new ActionRowBuilder().addComponents(
-        new TextInputBuilder().setCustomId('type_dev').setLabel('Type de développeur').setStyle(TextInputStyle.Short).setPlaceholder('UI, Builder, Animateur, Scripteur, Modélisateur, Designer').setRequired(true)
+        new TextInputBuilder().setCustomId('type_dev').setLabel('Type de développeur').setStyle(TextInputStyle.Short).setPlaceholder('UI, Builder, Animateur, Scripteur, Modélisateur, Designer').setRequired(true).setMaxLength(100)
       ),
       new ActionRowBuilder().addComponents(
-        new TextInputBuilder().setCustomId('disponibilite').setLabel('Disponibilité (jours / horaires)').setStyle(TextInputStyle.Short).setPlaceholder('Ex: Lun-Ven 18h-22h, Week-end toute la journée...').setRequired(true)
+        new TextInputBuilder().setCustomId('disponibilite').setLabel('Disponibilité (jours / horaires)').setStyle(TextInputStyle.Short).setPlaceholder('Ex: Lun-Ven 18h-22h, Week-end toute la journée...').setRequired(true).setMaxLength(300)
       ),
       new ActionRowBuilder().addComponents(
-        new TextInputBuilder().setCustomId('paiement').setLabel('Type de paiement souhaité').setStyle(TextInputStyle.Short).setPlaceholder('Ex: Robux, €, % sur projet...').setRequired(true)
+        new TextInputBuilder().setCustomId('paiement').setLabel('Type de paiement souhaité').setStyle(TextInputStyle.Short).setPlaceholder('Ex: Robux, €, % sur projet...').setRequired(true).setMaxLength(200)
       ),
     );
     await interaction.showModal(modal);
@@ -1046,6 +1092,10 @@ client.on('interactionCreate', async (interaction) => {
     return;
   }
 
+ } catch (err) {
+    console.error('⚠️ Erreur dans interactionCreate:', err);
+    await safeErrorReply(interaction);
+  }
 });
 
 client.login(CONFIG.TOKEN);
