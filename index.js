@@ -7,6 +7,19 @@ const healthServer = http.createServer((req, res) => {
 healthServer.on('error', (err) => console.error('⚠️ Serveur HTTP:', err));
 healthServer.listen(process.env.PORT || 3000);
 
+// Keep-alive : le bot ping sa propre URL toutes les 10 min pour éviter la mise en
+// veille du plan gratuit Render (qui s'endort après ~15 min sans trafic entrant).
+// Render fournit automatiquement RENDER_EXTERNAL_URL ; sinon, définis SELF_URL.
+const SELF_URL = process.env.RENDER_EXTERNAL_URL || process.env.SELF_URL;
+if (SELF_URL) {
+  setInterval(() => {
+    try {
+      const mod = SELF_URL.startsWith('https') ? require('https') : require('http');
+      mod.get(SELF_URL, (res) => res.resume()).on('error', () => {});
+    } catch {}
+  }, 10 * 60 * 1000);
+}
+
 const {
   Client, GatewayIntentBits, Partials, ChannelType, PermissionFlagsBits,
   EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle,
@@ -419,17 +432,23 @@ async function signalerDepartDev(guild, chId, rec) {
 
 // Au démarrage : rattrape les départs survenus pendant que le bot était hors-ligne.
 async function reconcilierMembres(guild) {
+  // On récupère TOUS les membres en une fois. Si ça échoue, on n'annule RIEN
+  // (évite d'annuler un contrat à tort à cause d'une erreur réseau passagère).
+  try {
+    await guild.members.fetch();
+  } catch (e) {
+    console.error('⚠️ reconcilierMembres (fetch global échoué, aucune action):', e);
+    return;
+  }
   try {
     for (const [chId, info] of ticketInfos.entries()) {
       const idx = ticketEtapes.get(chId) ?? info.etapeIndex ?? 0;
       if (idx === -1 || CONFIG.ETAPES[idx]?.id === 'TERMINE') continue;
-      const m = await guild.members.fetch(info.clientId).catch(() => null);
-      if (!m) await annulerContratDepartClient(guild, chId, info);
+      if (!guild.members.cache.has(info.clientId)) await annulerContratDepartClient(guild, chId, info);
     }
     for (const [chId, rec] of recruitInfos.entries()) {
       if (rec.candidateLeft) continue;
-      const m = await guild.members.fetch(rec.candidateId).catch(() => null);
-      if (!m) await signalerDepartDev(guild, chId, rec);
+      if (!guild.members.cache.has(rec.candidateId)) await signalerDepartDev(guild, chId, rec);
     }
     updateDashboard(guild);
   } catch (e) {
@@ -655,7 +674,7 @@ async function registerSlashCommands() {
           .setDescription('ID du salon contrat (laisse vide pour utiliser le salon actuel)')
           .setRequired(false)
       )
-      .addUserOption(opt => opt.setName('p1').setDescription('Dev 1').setRequired(true))
+      .addUserOption(opt => opt.setName('p1').setDescription('Dev 1').setRequired(false))
       .addUserOption(opt => opt.setName('p2').setDescription('Dev 2').setRequired(false))
       .addUserOption(opt => opt.setName('p3').setDescription('Dev 3').setRequired(false))
       .addUserOption(opt => opt.setName('p4').setDescription('Dev 4').setRequired(false))
@@ -802,7 +821,7 @@ client.on('interactionCreate', async (interaction) => {
             'Pour régler ton contrat :\n\n' +
             `**1.** Ouvre le gamepass 👉 ${lien}\n` +
             '**2.** Achète-le au **montant convenu**.\n' +
-            '**3.** **Envoie une capture d\'écran** de l\'objet possédé dans ton **inventaire** — cela confirme le paiement. ✅'
+            '**3.** Envoie une **preuve de paiement** ici pour confirmer. ✅'
           )
           .setFooter({ text: 'HEO Studio • Paiement' })],
       });
@@ -839,6 +858,9 @@ client.on('interactionCreate', async (interaction) => {
     for (const key of ['p1', 'p2', 'p3', 'p4', 'p5']) {
       const u = interaction.options.getUser(key);
       if (u && !vusDev.has(u.id)) { vusDev.add(u.id); devUsers.push(u); }
+    }
+    if (devUsers.length === 0) {
+      await interaction.editReply({ content: '⚠️ Indique au moins un développeur (option `p1`).' }); return;
     }
 
     const numStr       = padNum(info.num);
