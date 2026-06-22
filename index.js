@@ -13,6 +13,17 @@ const {
   StringSelectMenuBuilder, StringSelectMenuOptionBuilder,
 } = require('discord.js');
 const fs = require('fs');
+const { Redis } = require('@upstash/redis');
+
+// ─── STOCKAGE : Upstash Redis si configuré, sinon fichiers locaux (repli) ──────
+// Sur Render, le disque est effacé à chaque redémarrage : sans Redis, l'état
+// des tickets est perdu. Avec les 2 variables d'env ci-dessous, tout est gardé.
+const redis = (process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN)
+  ? new Redis({
+      url:   process.env.UPSTASH_REDIS_REST_URL,
+      token: process.env.UPSTASH_REDIS_REST_TOKEN,
+    })
+  : null;
 
 const client = new Client({
   intents: [
@@ -99,8 +110,16 @@ const CONFIG = {
 // ─── PERSISTANCE ──────────────────────────────────────────────────────────────
 const COUNTER_FILE = './counter.json';
 const TICKETS_FILE = './tickets.json';
+const REDIS_COUNTER_KEY = 'heo:counter';
+const REDIS_TICKETS_KEY = 'heo:tickets';
 
-function loadCounter() {
+async function loadCounter() {
+  if (redis) {
+    try {
+      const c = await redis.get(REDIS_COUNTER_KEY);
+      return Number(c) || 0;
+    } catch (e) { console.error('⚠️ loadCounter (redis):', e); return 0; }
+  }
   try {
     if (fs.existsSync(COUNTER_FILE)) return JSON.parse(fs.readFileSync(COUNTER_FILE, 'utf8')).count ?? 0;
   } catch {}
@@ -108,10 +127,21 @@ function loadCounter() {
 }
 
 function saveCounter(count) {
-  fs.writeFileSync(COUNTER_FILE, JSON.stringify({ count }));
+  if (redis) {
+    redis.set(REDIS_COUNTER_KEY, count).catch(e => console.error('⚠️ saveCounter (redis):', e));
+    return;
+  }
+  try { fs.writeFileSync(COUNTER_FILE, JSON.stringify({ count })); } catch (e) { console.error('⚠️ saveCounter:', e); }
 }
 
-function loadTickets() {
+async function loadTickets() {
+  if (redis) {
+    try {
+      let obj = await redis.get(REDIS_TICKETS_KEY);
+      if (typeof obj === 'string') obj = JSON.parse(obj);
+      return new Map(Object.entries(obj || {}));
+    } catch (e) { console.error('⚠️ loadTickets (redis):', e); return new Map(); }
+  }
   try {
     if (fs.existsSync(TICKETS_FILE)) return new Map(Object.entries(JSON.parse(fs.readFileSync(TICKETS_FILE, 'utf8'))));
   } catch {}
@@ -121,18 +151,30 @@ function loadTickets() {
 function saveTickets() {
   const obj = {};
   for (const [k, v] of ticketInfos.entries()) obj[k] = v;
-  fs.writeFileSync(TICKETS_FILE, JSON.stringify(obj));
+  if (redis) {
+    redis.set(REDIS_TICKETS_KEY, obj).catch(e => console.error('⚠️ saveTickets (redis):', e));
+    return;
+  }
+  try { fs.writeFileSync(TICKETS_FILE, JSON.stringify(obj)); } catch (e) { console.error('⚠️ saveTickets:', e); }
 }
 
-let contractCounter = loadCounter();
-
 // ─── STATE ────────────────────────────────────────────────────────────────────
+let contractCounter      = 0;
 const ticketEtapes       = new Map();
-const ticketInfos        = loadTickets();
+const ticketInfos        = new Map();
 const pendingRecrutement = new Map();
 
-for (const [channelId, info] of ticketInfos.entries()) {
-  ticketEtapes.set(channelId, info.etapeIndex ?? 0);
+// Charge l'état (compteur + tickets) au démarrage, depuis Redis ou les fichiers.
+async function initState() {
+  contractCounter = await loadCounter();
+  const loaded = await loadTickets();
+  ticketInfos.clear();
+  ticketEtapes.clear();
+  for (const [channelId, info] of loaded.entries()) {
+    ticketInfos.set(channelId, info);
+    ticketEtapes.set(channelId, info.etapeIndex ?? 0);
+  }
+  console.log(`✅ État chargé : ${ticketInfos.size} contrat(s) — compteur=${contractCounter} — stockage=${redis ? 'Upstash Redis' : 'fichiers locaux'}`);
 }
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -228,6 +270,7 @@ async function getContractMessage(channel, info) {
 // ─── READY ────────────────────────────────────────────────────────────────────
 client.once('ready', async () => {
   console.log(`✅ Connecté en tant que ${client.user.tag}`);
+  await initState();
   await registerSlashCommands();
 });
 
