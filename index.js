@@ -1,9 +1,11 @@
 const http = require('http');
 
-http.createServer((req, res) => {
+const healthServer = http.createServer((req, res) => {
   res.writeHead(200);
   res.end('HEO Bot en ligne');
-}).listen(process.env.PORT || 3000);
+});
+healthServer.on('error', (err) => console.error('⚠️ Serveur HTTP:', err));
+healthServer.listen(process.env.PORT || 3000);
 
 const {
   Client, GatewayIntentBits, Partials, ChannelType, PermissionFlagsBits,
@@ -148,6 +150,10 @@ const saveRecruits = () => saveMap(recruitInfos, REDIS_RECRUITS_KEY, RECRUITS_FI
 const ticketEtapes  = new Map();
 const ticketInfos   = new Map();
 const recruitInfos  = new Map();
+// Verrous anti double-clic : empêche un membre de créer 2 contrats/candidatures
+// en soumettant le formulaire deux fois très vite (avant que le 1er ait fini).
+const enCreationContrat = new Set();
+const enCreationRecrut  = new Set();
 
 // Charge l'état (contrats + recrutements) au démarrage, depuis Redis ou les fichiers.
 async function initState() {
@@ -186,6 +192,7 @@ function clip(text, max = 1024) {
 }
 
 function isStaffOrAdmin(member) {
+  if (!member?.roles?.cache) return false;
   return member.roles.cache.has(CONFIG.STAFF_ROLE_ID) ||
     member.roles.cache.has(CONFIG.SECRETAIRE_ROLE_ID) ||
     member.permissions.has(PermissionFlagsBits.Administrator);
@@ -224,6 +231,16 @@ function buildStaffRow(etapeIndex, annule = false) {
     new ButtonBuilder().setCustomId('etape_suivante').setLabel(isLast ? '✅ Terminé' : `➡️ ${CONFIG.ETAPES[etapeIndex + 1]?.label ?? 'Fin'}`).setStyle(isLast ? ButtonStyle.Success : ButtonStyle.Primary).setDisabled(isLast),
     new ButtonBuilder().setCustomId('annuler_contrat').setLabel('🚫 Annuler').setStyle(ButtonStyle.Danger),
     new ButtonBuilder().setCustomId('supprimer_ticket').setLabel('🗑️ Supprimer').setStyle(ButtonStyle.Secondary),
+  );
+}
+
+// Formulaire de création de contrat (partagé : bouton « Créer un contrat » + /contrat).
+function buildContratModal() {
+  return new ModalBuilder().setCustomId('modal_contrat').setTitle('Nouvelle demande de contrat').addComponents(
+    new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('nom_projet').setLabel('Nom du projet').setStyle(TextInputStyle.Short).setPlaceholder('Ex: Jeu Roblox RPG, Site vitrine...').setRequired(true).setMaxLength(100)),
+    new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('description').setLabel('Description du projet').setStyle(TextInputStyle.Paragraph).setPlaceholder('Décris ce que tu veux qu\'on réalise...').setRequired(true).setMaxLength(1000)),
+    new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('budget').setLabel('Budget estimé (en Robux ou €)').setStyle(TextInputStyle.Short).setPlaceholder('Ex: 5000 Robux, 50€...').setRequired(true).setMaxLength(100)),
+    new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('delai').setLabel('Délai souhaité').setStyle(TextInputStyle.Short).setPlaceholder('Ex: 2 semaines, 1 mois...').setRequired(false).setMaxLength(100)),
   );
 }
 
@@ -337,6 +354,10 @@ client.on('channelDelete', (channel) => {
 async function registerSlashCommands() {
   const commands = [
     new SlashCommandBuilder()
+      .setName('contrat')
+      .setDescription('Ouvre le formulaire pour créer un nouveau contrat')
+      .toJSON(),
+    new SlashCommandBuilder()
       .setName('contrats')
       .setDescription('Liste tous les contrats en cours')
       .toJSON(),
@@ -433,23 +454,27 @@ client.on('interactionCreate', async (interaction) => {
     const guild   = interaction.guild;
     const tickets = [];
     for (const [channelId, info] of ticketInfos.entries()) {
-  const channel = guild.channels.cache.get(channelId);
-  if (!channel) continue;
-  if (!info || info.num === undefined || info.nom === undefined) continue;
-  const etapeIndex = ticketEtapes.get(channelId) ?? 0;
+      const channel = guild.channels.cache.get(channelId);
+      if (!channel) continue;
+      if (!info || info.num === undefined || info.nom === undefined) continue;
+      const etapeIndex = ticketEtapes.get(channelId) ?? 0;
       if (etapeIndex === -1) continue;
       const etape = CONFIG.ETAPES[etapeIndex];
+      if (!etape) continue; // entrée corrompue : on l'ignore au lieu de planter
       tickets.push(`${etape.label} — **#${padNum(info.num)} ${info.nom}** — <@${info.clientId}> — ${channel}`);
     }
     if (tickets.length === 0) {
       await interaction.editReply({ content: '📭 Aucun contrat en cours.' });
       return;
     }
+    // La description d'un embed est limitée à 4096 caractères : on tronque proprement.
+    let desc = tickets.join('\n');
+    if (desc.length > 4000) desc = desc.slice(0, 4000) + `\n… et d'autres (liste trop longue)`;
     await interaction.editReply({
       embeds: [new EmbedBuilder()
         .setTitle('📋 Contrats en cours — HEO Studio')
         .setColor(0x5865F2)
-        .setDescription(tickets.join('\n'))
+        .setDescription(desc)
         .setFooter({ text: `${tickets.length} contrat(s) actif(s)` })
         .setTimestamp()],
     });
@@ -578,16 +603,15 @@ client.on('interactionCreate', async (interaction) => {
     return;
   }
 
-  // ── Créer un contrat ──────────────────────────────────────────────────────────
+  // ── /contrat : ouvre le formulaire de création ────────────────────────────────
+  if (interaction.isChatInputCommand() && interaction.commandName === 'contrat') {
+    await interaction.showModal(buildContratModal());
+    return;
+  }
+
+  // ── Créer un contrat (bouton du panneau) ──────────────────────────────────────
   if (interaction.isButton() && interaction.customId === 'creer_contrat') {
-    const modal = new ModalBuilder().setCustomId('modal_contrat').setTitle('Nouvelle demande de contrat');
-    modal.addComponents(
-      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('nom_projet').setLabel('Nom du projet').setStyle(TextInputStyle.Short).setPlaceholder('Ex: Jeu Roblox RPG, Site vitrine...').setRequired(true).setMaxLength(100)),
-      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('description').setLabel('Description du projet').setStyle(TextInputStyle.Paragraph).setPlaceholder('Décris ce que tu veux qu\'on réalise...').setRequired(true).setMaxLength(1000)),
-      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('budget').setLabel('Budget estimé (en Robux ou €)').setStyle(TextInputStyle.Short).setPlaceholder('Ex: 5000 Robux, 50€...').setRequired(true).setMaxLength(100)),
-      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('delai').setLabel('Délai souhaité').setStyle(TextInputStyle.Short).setPlaceholder('Ex: 2 semaines, 1 mois...').setRequired(false).setMaxLength(100)),
-    );
-    await interaction.showModal(modal);
+    await interaction.showModal(buildContratModal());
     return;
   }
 
@@ -600,6 +624,13 @@ client.on('interactionCreate', async (interaction) => {
     const delai       = interaction.fields.getTextInputValue('delai') || 'Non précisé';
     const guild       = interaction.guild;
     const user        = interaction.user;
+
+    // Verrou anti double-clic.
+    if (enCreationContrat.has(user.id)) {
+      await interaction.editReply({ content: '⏳ Ta demande est déjà en cours de création, patiente un instant.' }); return;
+    }
+    enCreationContrat.add(user.id);
+    try {
 
     // 1 seul contrat actif par client (on ignore les annulés et les terminés).
     for (const [chId, info] of ticketInfos.entries()) {
@@ -650,6 +681,9 @@ client.on('interactionCreate', async (interaction) => {
     await ticketChannel.send({ content: CONFIG.SECURITY_MESSAGE });
 
     await interaction.editReply({ content: `✅ Ton ticket a été créé : ${ticketChannel}` });
+    } finally {
+      enCreationContrat.delete(user.id);
+    }
     return;
   }
 
@@ -895,6 +929,13 @@ client.on('interactionCreate', async (interaction) => {
     const user          = interaction.user;
     const guild         = interaction.guild;
 
+    // Verrou anti double-clic.
+    if (enCreationRecrut.has(user.id)) {
+      await interaction.editReply({ content: '⏳ Ta candidature est déjà en cours de création, patiente un instant.' }); return;
+    }
+    enCreationRecrut.add(user.id);
+    try {
+
     // Anti-doublon : une seule candidature ouverte par personne (état persistant).
     for (const [chId, rec] of recruitInfos.entries()) {
       if (rec.candidateId === user.id) {
@@ -946,6 +987,9 @@ client.on('interactionCreate', async (interaction) => {
     });
 
     await interaction.editReply({ content: `✅ Ta candidature a été ouverte : ${ticketChannel}` });
+    } finally {
+      enCreationRecrut.delete(user.id);
+    }
     return;
   }
 
