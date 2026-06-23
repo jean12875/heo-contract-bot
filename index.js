@@ -1367,14 +1367,17 @@ client.on('interactionCreate', async (interaction) => {
     // L'identifiant du contrat = l'ID Discord du salon (unique, plus de numéro à 4 chiffres).
     // Le bot ne connaît l'ID qu'après la création, d'où le renommage ici.
     const num = ticketChannel.id;
-    // Renommage avec une 2e tentative : les renommages Discord sont limités en débit
-    // et échouaient parfois silencieusement (le salon restait nommé « contrat »).
-    try {
-      await ticketChannel.setName(`contrat-${num}`);
-    } catch (e1) {
-      console.error('⚠️ rename contrat (tentative 1):', e1?.message || e1);
-      await new Promise(r => setTimeout(r, 2500));
-      await ticketChannel.setName(`contrat-${num}`).catch(e2 => console.error('⚠️ rename contrat (échec):', e2?.message || e2));
+    // Renommage en `contrat-<id>` avec 3 tentatives (délai croissant). En cas d'échec
+    // définitif, on l'enregistre dans /debug pour diagnostiquer (le nom reste cosmétique).
+    let renomme = false;
+    for (let essai = 1; essai <= 3 && !renomme; essai++) {
+      try {
+        await ticketChannel.setName(`contrat-${num}`);
+        renomme = true;
+      } catch (e) {
+        if (essai === 3) logError('rename contrat', e);
+        else await new Promise(r => setTimeout(r, essai * 2000));
+      }
     }
 
     ticketEtapes.set(ticketChannel.id, 0);
