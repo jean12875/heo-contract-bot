@@ -4,7 +4,7 @@ const healthServer = http.createServer((req, res) => {
   res.writeHead(200);
   res.end('HEO Bot en ligne');
 });
-healthServer.on('error', (err) => console.error('⚠️ Serveur HTTP:', err));
+healthServer.on('error', (err) => logError('Serveur HTTP', err));
 healthServer.listen(process.env.PORT || 3000);
 
 // Keep-alive : le bot ping sa propre URL toutes les 10 min pour éviter la mise en
@@ -399,7 +399,7 @@ async function logTicket(guild, description, color = 0x5865F2, channelId = CONFI
   try {
     const ch = await guild.channels.fetch(channelId).catch(() => null);
     if (ch) await ch.send({ embeds: [new EmbedBuilder().setColor(color).setDescription(description).setTimestamp()] });
-  } catch (e) { console.error('⚠️ logTicket:', e); }
+  } catch (e) { logError('logTicket', e); }
 }
 
 // Rangée du panneau (menu déroulant des catégories). Reconstruite à chaque fois
@@ -454,7 +454,7 @@ async function logAction(guild, description, color = 0x5865F2) {
     const ch = await guild.channels.fetch(CONFIG.LOG_CHANNEL_ID).catch(() => null);
     if (ch) await ch.send({ embeds: [new EmbedBuilder().setColor(color).setDescription(description).setTimestamp()] });
   } catch (e) {
-    console.error('⚠️ logAction:', e);
+    logError('logAction', e);
   }
 }
 
@@ -469,7 +469,7 @@ async function archiveAndDelete(channel, guild, label, transcriptChannelId = CON
     const logCh = await guild.channels.fetch(transcriptChannelId).catch(() => null);
     if (logCh) await logCh.send({ content: `🗒️ Transcript — ${label} : \`${channel.name}\``, files: [file] });
   } catch (e) {
-    console.error('⚠️ archiveAndDelete (transcript):', e);
+    logError('archiveAndDelete (transcript)', e);
   }
   await channel.delete().catch(() => {});
 }
@@ -509,7 +509,7 @@ async function updateDashboard(guild) {
       saveMeta();
     }
   } catch (e) {
-    console.error('⚠️ updateDashboard:', e);
+    logError('updateDashboard', e);
   }
 }
 
@@ -565,7 +565,7 @@ async function updateAnnuaire(guild) {
       saveMeta();
     }
   } catch (e) {
-    console.error('⚠️ updateAnnuaire:', e);
+    logError('updateAnnuaire', e);
   }
 }
 
@@ -589,14 +589,14 @@ client.on('messageDelete', (msg) => {
       saveMeta();
       if (msg.guild) updateAnnuaire(msg.guild);
     }
-  } catch {}
+  } catch (e) { logError('messageDelete', e); }
 });
 
 // Met à jour l'annuaire quand les rôles d'un membre changent (même à la main).
 client.on('guildMemberUpdate', (oldM, newM) => {
   try {
     if (oldM.roles.cache.size !== newM.roles.cache.size) planifierAnnuaire(newM.guild);
-  } catch {}
+  } catch (e) { logError('guildMemberUpdate', e); }
 });
 
 // ─── DÉPART D'UN MEMBRE : helpers partagés (événement temps réel + réconciliation) ──
@@ -672,7 +672,7 @@ async function reconcilierMembres(guild) {
   try {
     await guild.members.fetch();
   } catch (e) {
-    console.error('⚠️ reconcilierMembres (fetch global échoué, aucune action):', e);
+    logError('reconcilierMembres (fetch global échoué, aucune action)', e);
     return;
   }
   try {
@@ -691,7 +691,7 @@ async function reconcilierMembres(guild) {
     }
     updateDashboard(guild);
   } catch (e) {
-    console.error('⚠️ reconcilierMembres:', e);
+    logError('reconcilierMembres', e);
   }
 }
 
@@ -716,7 +716,7 @@ async function verifierInactivite() {
       }
     }
   } catch (e) {
-    console.error('⚠️ verifierInactivite:', e);
+    logError('verifierInactivite', e);
   }
 }
 
@@ -792,20 +792,24 @@ async function changerEtape(interaction, sens) {
 
 // ─── READY ────────────────────────────────────────────────────────────────────
 client.once('ready', async () => {
-  console.log(`✅ Connecté en tant que ${client.user.tag}`);
-  await initState();
-  await registerSlashCommands();
-  // Rafraîchit le tableau + rattrape les départs manqués pendant l'arrêt.
-  const g = await client.guilds.fetch(CONFIG.GUILD_ID).catch(() => null);
-  if (g) {
-    updateDashboard(g);
-    updateAnnuaire(g);
-    reconcilierMembres(g);
+  try {
+    console.log(`✅ Connecté en tant que ${client.user.tag}`);
+    await initState();
+    await registerSlashCommands();
+    // Rafraîchit le tableau + rattrape les départs manqués pendant l'arrêt.
+    const g = await client.guilds.fetch(CONFIG.GUILD_ID).catch(() => null);
+    if (g) {
+      updateDashboard(g);
+      updateAnnuaire(g);
+      reconcilierMembres(g);
+    }
+    // Relances d'inactivité + rafraîchissement annuaire : passage après le boot, puis toutes les 6 h.
+    setTimeout(() => verifierInactivite().catch(e => logError('verifierInactivite (timeout)', e)), 60 * 1000);
+    setInterval(() => verifierInactivite().catch(e => logError('verifierInactivite (interval)', e)), 6 * 60 * 60 * 1000);
+    setInterval(() => { const gg = client.guilds.cache.get(CONFIG.GUILD_ID); if (gg) updateAnnuaire(gg); }, 6 * 60 * 60 * 1000);
+  } catch (e) {
+    logError('ready', e);
   }
-  // Relances d'inactivité + rafraîchissement annuaire : passage après le boot, puis toutes les 6 h.
-  setTimeout(verifierInactivite, 60 * 1000);
-  setInterval(verifierInactivite, 6 * 60 * 60 * 1000);
-  setInterval(() => { const gg = client.guilds.cache.get(CONFIG.GUILD_ID); if (gg) updateAnnuaire(gg); }, 6 * 60 * 60 * 1000);
 });
 
 // ─── NETTOYAGE AUTO ─────────────────────────────────────────────────────────────
@@ -824,7 +828,7 @@ client.on('channelDelete', (channel) => {
     if (recruitInfos.has(id)) { recruitInfos.delete(id); saveRecruits(); }
     if (ticketsClassic.has(id)) { ticketsClassic.delete(id); saveGTickets(); }
   } catch (e) {
-    console.error('⚠️ channelDelete:', e);
+    logError('channelDelete', e);
   }
 });
 
@@ -851,7 +855,7 @@ client.on('guildMemberRemove', async (member) => {
     }
     planifierAnnuaire(guild);
   } catch (e) {
-    console.error('⚠️ guildMemberRemove:', e);
+    logError('guildMemberRemove', e);
   }
 });
 
@@ -885,7 +889,7 @@ client.on('guildMemberAdd', async (member) => {
     }
     planifierAnnuaire(guild);
   } catch (e) {
-    console.error('⚠️ guildMemberAdd:', e);
+    logError('guildMemberAdd', e);
   }
 });
 
@@ -954,7 +958,7 @@ async function registerSlashCommands() {
     await rest.put(Routes.applicationGuildCommands(CONFIG.CLIENT_ID, CONFIG.GUILD_ID), { body: commands });
     console.log('✅ Commandes slash enregistrées');
   } catch (err) {
-    console.error('Erreur commandes:', err);
+    logError('registerSlashCommands', err);
   }
 }
 
