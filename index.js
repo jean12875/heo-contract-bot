@@ -72,6 +72,25 @@ const CONFIG = {
   DASHBOARD_CHANNEL_ID:      '1518540506483654716',
   ANNUAIRE_CHANNEL_ID:       '1518573444395044924',
 
+  // ─── TICKETS CLASSIQUES ──────────────────────────────────────────────────────
+  TICKET_PANEL_CHANNEL_ID:      '1487752758294614076',
+  TICKET_LOG_CHANNEL_ID:        '1497207320621355091',
+  TICKET_TRANSCRIPT_CHANNEL_ID: '1519018021618712717',
+  TICKET_FERME_CAT:             '1507423716152311838',
+  // Salons dédiés (admin only) pour les reports staff — confidentiels.
+  TICKET_RS_LOG_CHANNEL_ID:        '1519022980108259499',
+  TICKET_RS_TRANSCRIPT_CHANNEL_ID: '1519023061062520923',
+  TICKET_CATEGORIES: {
+    question:      { label: '❓ Question',              cat: '1507421344239718411' },
+    suggestion:    { label: '💡 Suggestion',            cat: '1507421419695374579' },
+    report_membre: { label: '🚨 Report membre',         cat: '1507421466373783552' },
+    report_staff:  { label: '🛡️ Report staff',          cat: '1507421510938132611' },
+    recrutement:   { label: '📋 Recrutement (modo, secrétaire…)', cat: '1507421553296408606' },
+    partenariat:   { label: '🤝 Partenariat',           cat: '1507421588591611914' },
+    recompense:    { label: '🎁 Demande de récompense', cat: '1507422227929497800' },
+    autre:         { label: '📌 Autre',                 cat: '1507421703020740748' },
+  },
+
   CATEGORIES: {
     NEGOCIATION:   '1487848273355210803',
     PAIEMENT_1:    '1487848408050962593',
@@ -128,10 +147,12 @@ const TICKETS_FILE = './tickets.json';
 const RECRUITS_FILE = './recruits.json';
 const COOLDOWNS_FILE = './cooldowns.json';
 const META_FILE = './meta.json';
+const GTICKETS_FILE = './gtickets.json';
 const REDIS_TICKETS_KEY = 'heo:tickets';
 const REDIS_RECRUITS_KEY = 'heo:recruits';
 const REDIS_COOLDOWNS_KEY = 'heo:refuscooldowns';
 const REDIS_META_KEY = 'heo:meta';
+const REDIS_GTICKETS_KEY = 'heo:gtickets';
 const ERRORS_FILE = './errors.json';
 const REDIS_ERRORS_KEY = 'heo:errors';
 const REFUS_COOLDOWN_MS = 30 * 24 * 60 * 60 * 1000; // 1 mois
@@ -170,6 +191,8 @@ const loadCooldowns = () => loadMap(REDIS_COOLDOWNS_KEY, COOLDOWNS_FILE);
 const saveCooldowns = () => saveMap(refusCooldowns, REDIS_COOLDOWNS_KEY, COOLDOWNS_FILE);
 const loadMeta      = () => loadMap(REDIS_META_KEY, META_FILE);
 const saveMeta      = () => saveMap(meta, REDIS_META_KEY, META_FILE);
+const loadGTickets  = () => loadMap(REDIS_GTICKETS_KEY, GTICKETS_FILE);
+const saveGTickets  = () => saveMap(ticketsClassic, REDIS_GTICKETS_KEY, GTICKETS_FILE);
 
 // Journal d'erreurs persistant (Upstash) — consultable via /debug même après un crash.
 function saveErrors() {
@@ -200,6 +223,7 @@ const recruitInfos  = new Map();
 const refusCooldowns = new Map(); // userId -> timestamp du dernier refus
 const meta = new Map();           // divers : ex. id du message du tableau secrétaire
 const errorLog = [];              // 50 dernières erreurs, consultables via /debug
+const ticketsClassic = new Map(); // tickets classiques : channelId -> { category, openerId, status, msgId }
 // Verrous anti double-clic : empêche un membre de créer 2 contrats/candidatures
 // en soumettant le formulaire deux fois très vite (avant que le 1er ait fini).
 const enCreationContrat = new Set();
@@ -226,7 +250,10 @@ async function initState() {
   const loadedErrors = await loadErrors();
   errorLog.length = 0;
   errorLog.push(...loadedErrors.slice(-50));
-  console.log(`✅ État chargé : ${ticketInfos.size} contrat(s), ${recruitInfos.size} recrutement(s) — stockage=${redis ? 'Upstash Redis' : 'fichiers locaux'}`);
+  const loadedGTickets = await loadGTickets();
+  ticketsClassic.clear();
+  for (const [chId, t] of loadedGTickets.entries()) ticketsClassic.set(chId, t);
+  console.log(`✅ État chargé : ${ticketInfos.size} contrat(s), ${recruitInfos.size} recrutement(s), ${ticketsClassic.size} ticket(s) — stockage=${redis ? 'Upstash Redis' : 'fichiers locaux'}`);
 }
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -314,6 +341,93 @@ function buildDevDeleteRow() {
   );
 }
 
+// ─── TICKETS CLASSIQUES : helpers ───────────────────────────────────────────
+const TICKET_ACCUEIL = {
+  question:      'Pose ta question en détail, on te répond dès que possible.',
+  suggestion:    'Décris ta suggestion : qu\'est-ce que tu proposes et pourquoi ?',
+  report_membre: 'Indique le **membre** concerné, ce qu\'il s\'est passé, et joins des **preuves** (captures, liens).',
+  report_staff:  'Indique le **staff** concerné, les faits, et joins des **preuves**. Ce ticket est **confidentiel** (visible uniquement par le propriétaire du serveur).',
+  recrutement:   'Précise le **poste** visé (modérateur, secrétaire…) et pourquoi tu postules. *(Pour devenir développeur, utilise plutôt le panneau de candidature dev.)*',
+  partenariat:   'Présente ton serveur / projet, son nombre de membres, et ce que tu proposes comme partenariat.',
+  recompense:    'Indique quelle **récompense** tu demandes et pourquoi (preuves si besoin).',
+  autre:         'Explique ta demande en détail.',
+};
+
+// Admin (ou propriétaire) : seul autorisé à SUPPRIMER un ticket, et à gérer les reports staff.
+function isAdmin(member) {
+  if (!member?.guild) return false;
+  return member.id === member.guild.ownerId || member.permissions.has(PermissionFlagsBits.Administrator);
+}
+
+// Qui peut gérer (fermer côté staff / rouvrir) ce ticket ?
+function isTicketStaff(member, ticket) {
+  if (!member?.guild) return false;
+  if (ticket?.category === 'report_staff') return isAdmin(member); // report staff → admin uniquement
+  return isAdmin(member) || member.roles.cache.has(CONFIG.SECRETAIRE_ROLE_ID);
+}
+
+// Salons de logs/transcript selon la catégorie (les reports staff ont leurs canaux dédiés admin).
+const ticketLogChannelId = (cat) => (cat === 'report_staff' ? CONFIG.TICKET_RS_LOG_CHANNEL_ID : CONFIG.TICKET_LOG_CHANNEL_ID);
+const ticketTranscriptChannelId = (cat) => (cat === 'report_staff' ? CONFIG.TICKET_RS_TRANSCRIPT_CHANNEL_ID : CONFIG.TICKET_TRANSCRIPT_CHANNEL_ID);
+
+// Compte les tickets OUVERTS d'un membre (total + par catégorie), en ignorant les salons disparus.
+function compterTicketsOuverts(userId, guild) {
+  let total = 0; const parCat = {};
+  for (const [chId, t] of ticketsClassic.entries()) {
+    if (t.openerId !== userId || t.status !== 'open') continue;
+    if (!guild.channels.cache.get(chId)) continue;
+    total++; parCat[t.category] = (parCat[t.category] || 0) + 1;
+  }
+  return { total, parCat };
+}
+
+function ticketRowOuvert() {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('tkt_fermer').setLabel('🔒 Fermer').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('tkt_supprimer').setLabel('🗑️ Supprimer').setStyle(ButtonStyle.Danger),
+  );
+}
+function ticketRowFerme() {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('tkt_rouvrir').setLabel('🔓 Rouvrir').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId('tkt_supprimer').setLabel('🗑️ Supprimer').setStyle(ButtonStyle.Danger),
+  );
+}
+
+// Journal du système de tickets (salon dédié).
+async function logTicket(guild, description, color = 0x5865F2, channelId = CONFIG.TICKET_LOG_CHANNEL_ID) {
+  try {
+    const ch = await guild.channels.fetch(channelId).catch(() => null);
+    if (ch) await ch.send({ embeds: [new EmbedBuilder().setColor(color).setDescription(description).setTimestamp()] });
+  } catch (e) { console.error('⚠️ logTicket:', e); }
+}
+
+// Rangée du panneau (menu déroulant des catégories). Reconstruite à chaque fois
+// pour pouvoir réinitialiser le menu après une sélection.
+function panneauTicketRow() {
+  const menu = new StringSelectMenuBuilder()
+    .setCustomId('tkt_open')
+    .setPlaceholder('📩 Choisis une catégorie pour ouvrir un ticket...')
+    .addOptions(Object.entries(CONFIG.TICKET_CATEGORIES).map(([key, v]) =>
+      new StringSelectMenuOptionBuilder().setLabel(v.label).setValue(key)));
+  return new ActionRowBuilder().addComponents(menu);
+}
+
+// Poste le panneau d'ouverture de ticket (menu déroulant).
+async function envoyerPanneauTicket(guild) {
+  const ch = await guild.channels.fetch(CONFIG.TICKET_PANEL_CHANNEL_ID).catch(() => null);
+  if (!ch) return false;
+  await ch.send({
+    embeds: [new EmbedBuilder()
+      .setTitle('🎫 HEO Studio — Ouvrir un ticket')
+      .setDescription('Choisis une catégorie dans le menu ci-dessous pour ouvrir un ticket. Un salon privé sera créé pour toi et l\'équipe.')
+      .setColor(0x5865F2)
+      .setFooter({ text: 'HEO Studio • Support' })],
+    components: [panneauTicketRow()],
+  });
+  return true;
+}
+
 // Récupère le salon dev associé à un contrat
 async function getDevChannel(guild, info) {
   if (!info?.devChannelId) return null;
@@ -345,14 +459,14 @@ async function logAction(guild, description, color = 0x5865F2) {
 }
 
 // Génère un transcript HTML de la conversation, l'envoie dans le salon transcripts, puis supprime le salon.
-async function archiveAndDelete(channel, guild, label) {
+async function archiveAndDelete(channel, guild, label, transcriptChannelId = CONFIG.LOG_TRANSCRIPT_CHANNEL_ID) {
   try {
     const file = await transcripts.createTranscript(channel, {
       limit: -1,
       filename: `${label}-${channel.name}.html`,
       poweredBy: false,
     });
-    const logCh = await guild.channels.fetch(CONFIG.LOG_TRANSCRIPT_CHANNEL_ID).catch(() => null);
+    const logCh = await guild.channels.fetch(transcriptChannelId).catch(() => null);
     if (logCh) await logCh.send({ content: `🗒️ Transcript — ${label} : \`${channel.name}\``, files: [file] });
   } catch (e) {
     console.error('⚠️ archiveAndDelete (transcript):', e);
@@ -534,6 +648,23 @@ async function signalerDepartDev(guild, chId, rec) {
   await logAction(guild, `🚪 Candidat <@${rec.candidateId}> parti — candidature \`${channel.name}\``, 0xED4245);
 }
 
+// Ferme automatiquement un ticket quand son auteur quitte le serveur (sans le supprimer).
+async function fermerTicketDepart(guild, chId, ticket) {
+  ticket.status = 'closed';
+  saveGTickets();
+  const channel = await guild.channels.fetch(chId).catch(() => null);
+  if (!channel) return;
+  await channel.setParent(CONFIG.TICKET_FERME_CAT, { lockPermissions: false }).catch(() => {});
+  const msg = ticket.msgId ? await channel.messages.fetch(ticket.msgId).catch(() => null) : null;
+  if (msg) await msg.edit({ components: [ticketRowFerme()] }).catch(() => {});
+  const pingTarget = ticket.category === 'report_staff' ? `<@${guild.ownerId}>` : `<@&${CONFIG.SECRETAIRE_ROLE_ID}>`;
+  await channel.send({
+    content: pingTarget,
+    embeds: [new EmbedBuilder().setColor(0xFAA61A).setDescription('🚪 L\'auteur du ticket a **quitté le serveur**. Le ticket est **fermé automatiquement** — un admin peut le supprimer.').setTimestamp()],
+  }).catch(() => {});
+  await logTicket(guild, `🚪 Auteur parti → ticket \`${channel.name}\` fermé automatiquement`, 0xFAA61A, ticketLogChannelId(ticket.category));
+}
+
 // Au démarrage : rattrape les départs survenus pendant que le bot était hors-ligne.
 async function reconcilierMembres(guild) {
   // On récupère TOUS les membres en une fois. Si ça échoue, on n'annule RIEN
@@ -553,6 +684,10 @@ async function reconcilierMembres(guild) {
     for (const [chId, rec] of recruitInfos.entries()) {
       if (rec.candidateLeft) continue;
       if (!guild.members.cache.has(rec.candidateId)) await signalerDepartDev(guild, chId, rec);
+    }
+    for (const [chId, ticket] of ticketsClassic.entries()) {
+      if (ticket.status !== 'open') continue;
+      if (!guild.members.cache.has(ticket.openerId)) await fermerTicketDepart(guild, chId, ticket);
     }
     updateDashboard(guild);
   } catch (e) {
@@ -687,6 +822,7 @@ client.on('channelDelete', (channel) => {
     }
     if (changedTickets) { saveTickets(); if (channel.guild) updateDashboard(channel.guild); }
     if (recruitInfos.has(id)) { recruitInfos.delete(id); saveRecruits(); }
+    if (ticketsClassic.has(id)) { ticketsClassic.delete(id); saveGTickets(); }
   } catch (e) {
     console.error('⚠️ channelDelete:', e);
   }
@@ -708,6 +844,10 @@ client.on('guildMemberRemove', async (member) => {
     for (const [chId, rec] of recruitInfos.entries()) {
       if (rec.candidateId !== member.id) continue;
       await signalerDepartDev(guild, chId, rec);
+    }
+    for (const [chId, ticket] of ticketsClassic.entries()) {
+      if (ticket.openerId !== member.id || ticket.status !== 'open') continue;
+      await fermerTicketDepart(guild, chId, ticket);
     }
     planifierAnnuaire(guild);
   } catch (e) {
@@ -771,6 +911,10 @@ async function registerSlashCommands() {
     new SlashCommandBuilder()
       .setName('debug')
       .setDescription('Affiche les dernières erreurs du bot (staff)')
+      .toJSON(),
+    new SlashCommandBuilder()
+      .setName('ticketpanel')
+      .setDescription('Poste le panneau d\'ouverture de tickets (staff)')
       .toJSON(),
     new SlashCommandBuilder()
       .setName('paiement')
@@ -930,6 +1074,17 @@ client.on('interactionCreate', async (interaction) => {
         .setTimestamp()],
       ephemeral: true,
     });
+    return;
+  }
+
+  // ── /ticketpanel : poste le panneau de tickets (staff) ───────────────────────
+  if (interaction.isChatInputCommand() && interaction.commandName === 'ticketpanel') {
+    if (!isStaffOrAdmin(interaction.member)) {
+      await interaction.reply({ content: '❌ Réservé au staff.', ephemeral: true }); return;
+    }
+    await interaction.deferReply({ ephemeral: true });
+    const ok = await envoyerPanneauTicket(interaction.guild);
+    await interaction.editReply({ content: ok ? '✅ Panneau de tickets posté.' : '❌ Salon du panneau introuvable (vérifie TICKET_PANEL_CHANNEL_ID).' });
     return;
   }
 
@@ -1462,6 +1617,158 @@ client.on('interactionCreate', async (interaction) => {
     await logAction(guild, `🗑️ Salon dev \`${devChannel.name}\` supprimé par <@${interaction.user.id}>`, 0xED4245);
     await interaction.reply({ content: '🗑️ Suppression du salon dev en cours... (un transcript est sauvegardé)', ephemeral: true });
     setTimeout(() => archiveAndDelete(devChannel, guild, 'dev'), 2000);
+    return;
+  }
+
+  // ════════════════════════════════════════════════════════════════════════════
+  // ─── TICKETS CLASSIQUES ─────────────────────────────────────────────────────
+  // ════════════════════════════════════════════════════════════════════════════
+
+  // ── Ouvrir un ticket (menu déroulant) ─────────────────────────────────────────
+  if (interaction.isStringSelectMenu() && interaction.customId === 'tkt_open') {
+    const category = interaction.values[0];
+    const conf = CONFIG.TICKET_CATEGORIES[category];
+    if (!conf) { await interaction.reply({ content: '❌ Catégorie inconnue.', ephemeral: true }); return; }
+    await interaction.deferReply({ ephemeral: true });
+    const guild = interaction.guild;
+    const user  = interaction.user;
+
+    const { total, parCat } = compterTicketsOuverts(user.id, guild);
+    if ((parCat[category] || 0) >= 1) {
+      await interaction.editReply({ content: '❌ Tu as déjà un ticket ouvert dans cette catégorie.' }); return;
+    }
+    if (total >= 3) {
+      await interaction.editReply({ content: '❌ Tu as déjà 3 tickets ouverts (maximum). Ferme-en un avant d\'en ouvrir un nouveau.' }); return;
+    }
+
+    const overwrites = [
+      { id: guild.roles.everyone, deny: [PermissionFlagsBits.ViewChannel] },
+      { id: user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] },
+    ];
+    // Report staff : aucun overwrite staff → seuls les ADMINS (permission Administrator,
+    // qui passe outre les overwrites) + l'auteur voient le salon. Confidentiel.
+    if (category !== 'report_staff') {
+      overwrites.push({ id: CONFIG.SECRETAIRE_ROLE_ID, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.ManageChannels] });
+    }
+
+    const slug = user.username.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 20) || 'membre';
+    const ch = await guild.channels.create({
+      name: `${category.replace(/_/g, '-')}-${slug}`,
+      type: ChannelType.GuildText,
+      parent: conf.cat,
+      permissionOverwrites: overwrites,
+    });
+
+    const pingTarget = category === 'report_staff' ? `<@${guild.ownerId}>` : `<@&${CONFIG.SECRETAIRE_ROLE_ID}>`;
+    const welcome = await ch.send({
+      content: `🎫 <@${user.id}> | ${pingTarget}`,
+      embeds: [new EmbedBuilder()
+        .setColor(0x5865F2)
+        .setTitle(`🎫 Ticket — ${conf.label}`)
+        .setDescription(TICKET_ACCUEIL[category] || 'Explique ta demande en détail.')
+        .addFields({ name: '👤 Ouvert par', value: `<@${user.id}>`, inline: true })
+        .setFooter({ text: 'HEO Studio • Support' })
+        .setTimestamp()],
+      components: [ticketRowOuvert()],
+    });
+
+    ticketsClassic.set(ch.id, { category, openerId: user.id, status: 'open', msgId: welcome.id });
+    saveGTickets();
+    await logTicket(guild, `🎫 Ticket **${conf.label}** ouvert par <@${user.id}> — ${ch}`, 0x57F287, ticketLogChannelId(category));
+    // Réinitialise le menu du panneau (sinon re-choisir la même catégorie pourrait ne rien déclencher).
+    await interaction.message.edit({ components: [panneauTicketRow()] }).catch(() => {});
+    await interaction.editReply({ content: `✅ Ton ticket a été ouvert : ${ch}` });
+    return;
+  }
+
+  // ── Fermer un ticket (auteur ou staff) → demande la raison ────────────────────
+  if (interaction.isButton() && interaction.customId === 'tkt_fermer') {
+    const ticket = ticketsClassic.get(interaction.channel.id);
+    if (!ticket) { await interaction.reply({ content: '⚠️ Ce salon n\'est pas un ticket reconnu.', ephemeral: true }); return; }
+    if (interaction.user.id !== ticket.openerId && !isTicketStaff(interaction.member, ticket)) {
+      await interaction.reply({ content: '❌ Seul l\'auteur du ticket ou le staff peut le fermer.', ephemeral: true }); return;
+    }
+    if (ticket.status === 'closed') { await interaction.reply({ content: '⚠️ Ce ticket est déjà fermé.', ephemeral: true }); return; }
+    const modal = new ModalBuilder().setCustomId('tkt_modal_fermer').setTitle('Fermer le ticket').addComponents(
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('raison').setLabel('Raison de la fermeture').setStyle(TextInputStyle.Paragraph).setRequired(true).setMaxLength(500)),
+    );
+    await interaction.showModal(modal);
+    return;
+  }
+
+  // ── Modal fermeture soumis ────────────────────────────────────────────────────
+  if (interaction.isModalSubmit() && interaction.customId === 'tkt_modal_fermer') {
+    await interaction.deferReply({ ephemeral: true });
+    const channel = interaction.channel;
+    const ticket  = ticketsClassic.get(channel.id);
+    if (!ticket) { await interaction.editReply({ content: '⚠️ Ticket introuvable.' }); return; }
+    const raison = interaction.fields.getTextInputValue('raison');
+
+    ticket.status = 'closed';
+    saveGTickets();
+    await channel.setParent(CONFIG.TICKET_FERME_CAT, { lockPermissions: false }).catch(() => {});
+    await channel.permissionOverwrites.edit(ticket.openerId, { ViewChannel: false }).catch(() => {});
+
+    const msg = ticket.msgId ? await channel.messages.fetch(ticket.msgId).catch(() => null) : null;
+    if (msg) await msg.edit({ components: [ticketRowFerme()] }).catch(() => {});
+
+    await channel.send({ embeds: [new EmbedBuilder().setColor(0xFAA61A).setDescription(`🔒 Ticket **fermé** par <@${interaction.user.id}>\n**Raison :** ${clip(raison, 1000)}`).setTimestamp()] }).catch(() => {});
+    await logTicket(interaction.guild, `🔒 Ticket \`${channel.name}\` (${CONFIG.TICKET_CATEGORIES[ticket.category]?.label || ticket.category}) fermé par <@${interaction.user.id}> — Raison : ${clip(raison, 300)}`, 0xFAA61A, ticketLogChannelId(ticket.category));
+    await interaction.editReply({ content: '✅ Ticket fermé.' });
+    return;
+  }
+
+  // ── Rouvrir un ticket (staff) ─────────────────────────────────────────────────
+  if (interaction.isButton() && interaction.customId === 'tkt_rouvrir') {
+    const ticket = ticketsClassic.get(interaction.channel.id);
+    if (!ticket) { await interaction.reply({ content: '⚠️ Ce salon n\'est pas un ticket reconnu.', ephemeral: true }); return; }
+    if (!isTicketStaff(interaction.member, ticket)) { await interaction.reply({ content: '❌ Réservé au staff.', ephemeral: true }); return; }
+    await interaction.deferReply({ ephemeral: true });
+    const channel = interaction.channel;
+    ticket.status = 'open';
+    saveGTickets();
+    const catId = CONFIG.TICKET_CATEGORIES[ticket.category]?.cat;
+    if (catId) await channel.setParent(catId, { lockPermissions: false }).catch(() => {});
+    await channel.permissionOverwrites.edit(ticket.openerId, { ViewChannel: true, SendMessages: true, ReadMessageHistory: true }).catch(() => {});
+    const msg = ticket.msgId ? await channel.messages.fetch(ticket.msgId).catch(() => null) : null;
+    if (msg) await msg.edit({ components: [ticketRowOuvert()] }).catch(() => {});
+    await channel.send({ embeds: [new EmbedBuilder().setColor(0x57F287).setDescription(`🔓 Ticket **rouvert** par <@${interaction.user.id}>`).setTimestamp()] }).catch(() => {});
+    await logTicket(interaction.guild, `🔓 Ticket \`${channel.name}\` rouvert par <@${interaction.user.id}>`, 0x57F287, ticketLogChannelId(ticket.category));
+    await interaction.editReply({ content: '✅ Ticket rouvert.' });
+    return;
+  }
+
+  // ── Supprimer un ticket (staff) → confirmation ────────────────────────────────
+  if (interaction.isButton() && interaction.customId === 'tkt_supprimer') {
+    if (!isAdmin(interaction.member)) { await interaction.reply({ content: '❌ Réservé aux administrateurs.', ephemeral: true }); return; }
+    await interaction.reply({
+      content: '⚠️ Supprimer **définitivement** ce ticket ? Un transcript sera sauvegardé.',
+      components: [new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(`tkt_confirm_suppr_${interaction.channel.id}`).setLabel('✅ Oui, supprimer').setStyle(ButtonStyle.Danger),
+        new ButtonBuilder().setCustomId('tkt_annul_suppr').setLabel('❌ Annuler').setStyle(ButtonStyle.Secondary),
+      )],
+      ephemeral: true,
+    });
+    return;
+  }
+
+  if (interaction.isButton() && interaction.customId === 'tkt_annul_suppr') {
+    await interaction.reply({ content: '✅ Suppression annulée.', ephemeral: true }); return;
+  }
+
+  if (interaction.isButton() && interaction.customId.startsWith('tkt_confirm_suppr_')) {
+    const channelId = interaction.customId.replace('tkt_confirm_suppr_', '');
+    const channel = await interaction.guild.channels.fetch(channelId).catch(() => null);
+    if (!channel) return;
+    if (!isAdmin(interaction.member)) { await interaction.reply({ content: '❌ Réservé aux administrateurs.', ephemeral: true }); return; }
+    const ticket = ticketsClassic.get(channelId);
+    const cat = ticket?.category;
+    const guild = interaction.guild;
+    ticketsClassic.delete(channelId);
+    saveGTickets();
+    await interaction.reply({ content: '🗑️ Suppression en cours... (un transcript est sauvegardé)', ephemeral: true });
+    await logTicket(guild, `🗑️ Ticket \`${channel.name}\` supprimé par <@${interaction.user.id}>`, 0xED4245, ticketLogChannelId(cat));
+    setTimeout(() => archiveAndDelete(channel, guild, cat === 'report_staff' ? 'report-staff' : 'ticket', ticketTranscriptChannelId(cat)), 2000);
     return;
   }
 
