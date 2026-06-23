@@ -284,13 +284,13 @@ function isStaffOrAdmin(member) {
   if (!member?.roles?.cache) return false;
   return member.roles.cache.has(CONFIG.STAFF_ROLE_ID) ||
     member.roles.cache.has(CONFIG.SECRETAIRE_ROLE_ID) ||
-    member.permissions.has(PermissionFlagsBits.Administrator);
+    !!member.permissions?.has(PermissionFlagsBits.Administrator);
 }
 
 // ─── HELPERS ──────────────────────────────────────────────────────────────────
 
 function buildEmbed(num, nom, description, budget, delai, user, etapeIndex, budgetLabel = '💰 Budget') {
-  const etape = CONFIG.ETAPES[etapeIndex];
+  const etape = CONFIG.ETAPES[etapeIndex] || CONFIG.ETAPES[0]; // garde-fou : jamais undefined
   return new EmbedBuilder()
     .setTitle(`📋 Contrat #${padNum(num)} — ${nom}`)
     .setColor(etape.color)
@@ -356,7 +356,7 @@ const TICKET_ACCUEIL = {
 // Admin (ou propriétaire) : seul autorisé à SUPPRIMER un ticket, et à gérer les reports staff.
 function isAdmin(member) {
   if (!member?.guild) return false;
-  return member.id === member.guild.ownerId || member.permissions.has(PermissionFlagsBits.Administrator);
+  return member.id === member.guild.ownerId || !!member.permissions?.has(PermissionFlagsBits.Administrator);
 }
 
 // Qui peut gérer (fermer côté staff / rouvrir) ce ticket ?
