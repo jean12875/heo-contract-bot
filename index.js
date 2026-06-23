@@ -228,6 +228,7 @@ const ticketsClassic = new Map(); // tickets classiques : channelId -> { categor
 // en soumettant le formulaire deux fois très vite (avant que le 1er ait fini).
 const enCreationContrat = new Set();
 const enCreationRecrut  = new Set();
+const enCreationTicket  = new Set();
 
 // Charge l'état (contrats + recrutements) au démarrage, depuis Redis ou les fichiers.
 async function initState() {
@@ -1640,6 +1641,13 @@ client.on('interactionCreate', async (interaction) => {
     const guild = interaction.guild;
     const user  = interaction.user;
 
+    // Verrou anti double-clic (le comptage anti-spam n'est pas atomique sinon).
+    if (enCreationTicket.has(user.id)) {
+      await interaction.editReply({ content: '⏳ Ton ticket est déjà en cours de création, patiente un instant.' }); return;
+    }
+    enCreationTicket.add(user.id);
+    try {
+
     const { total, parCat } = compterTicketsOuverts(user.id, guild);
     if ((parCat[category] || 0) >= 1) {
       await interaction.editReply({ content: '❌ Tu as déjà un ticket ouvert dans cette catégorie.' }); return;
@@ -1659,12 +1667,19 @@ client.on('interactionCreate', async (interaction) => {
     }
 
     const slug = user.username.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 20) || 'membre';
-    const ch = await guild.channels.create({
-      name: `${category.replace(/_/g, '-')}-${slug}`,
-      type: ChannelType.GuildText,
-      parent: conf.cat,
-      permissionOverwrites: overwrites,
-    });
+    let ch;
+    try {
+      ch = await guild.channels.create({
+        name: `${category.replace(/_/g, '-')}-${slug}`,
+        type: ChannelType.GuildText,
+        parent: conf.cat,
+        permissionOverwrites: overwrites,
+      });
+    } catch (e) {
+      logError('création ticket', e);
+      await interaction.editReply({ content: '❌ Impossible de créer le salon (catégorie pleine ou permissions manquantes). Préviens un admin.' });
+      return;
+    }
 
     const pingTarget = category === 'report_staff' ? `<@${guild.ownerId}>` : `<@&${CONFIG.SECRETAIRE_ROLE_ID}>`;
     const welcome = await ch.send({
@@ -1685,6 +1700,9 @@ client.on('interactionCreate', async (interaction) => {
     // Réinitialise le menu du panneau (sinon re-choisir la même catégorie pourrait ne rien déclencher).
     await interaction.message.edit({ components: [panneauTicketRow()] }).catch(() => {});
     await interaction.editReply({ content: `✅ Ton ticket a été ouvert : ${ch}` });
+    } finally {
+      enCreationTicket.delete(user.id);
+    }
     return;
   }
 
