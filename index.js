@@ -1857,7 +1857,7 @@ client.on('interactionCreate', async (interaction) => {
     saveRecruits();
 
     await ticketChannel.send({
-      content: `👋 <@${user.id}> | <@&${CONFIG.STAFF_ROLE_ID}>`,
+      content: `👋 <@${user.id}> | <@&${CONFIG.SECRETAIRE_ROLE_ID}>`,
       embeds: [new EmbedBuilder()
         .setTitle(`📩 Candidature — ${user.username}`)
         .setColor(0x5865F2)
