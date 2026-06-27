@@ -67,6 +67,8 @@ const CONFIG = {
   PANEL_CHANNEL_ID:   '1495692176020078602',
   STAFF_ROLE_ID:      '1487848016110162153',
   SECRETAIRE_ROLE_ID: '1490464910549712937',
+  FONDATEUR_ROLE_ID:  '1485191413837856966',
+  GERANT_ROLE_ID:     '1500049483294052384',
   LOG_CHANNEL_ID:            '1518537607481397379',
   LOG_TRANSCRIPT_CHANNEL_ID: '1518537756526121030',
   DASHBOARD_CHANNEL_ID:      '1518540506483654716',
@@ -347,23 +349,25 @@ const TICKET_ACCUEIL = {
   question:      'Pose ta question en détail, on te répond dès que possible.',
   suggestion:    'Décris ta suggestion : qu\'est-ce que tu proposes et pourquoi ?',
   report_membre: 'Indique le **membre** concerné, ce qu\'il s\'est passé, et joins des **preuves** (captures, liens).',
-  report_staff:  'Indique le **staff** concerné, les faits, et joins des **preuves**. Ce ticket est **confidentiel** (visible uniquement par le propriétaire du serveur).',
+  report_staff:  'Indique le **staff** concerné, les faits, et joins des **preuves**. Ce ticket est **confidentiel** (visible uniquement par **les fondateurs**).',
   recrutement:   'Précise le **poste** visé (modérateur, secrétaire…) et pourquoi tu postules. *(Pour devenir développeur, utilise plutôt le panneau de candidature dev.)*',
   partenariat:   'Présente ton serveur / projet, son nombre de membres, et ce que tu proposes comme partenariat.',
   recompense:    'Indique quelle **récompense** tu demandes et pourquoi (preuves si besoin).',
   autre:         'Explique ta demande en détail.',
 };
 
-// Admin (ou propriétaire) : seul autorisé à SUPPRIMER un ticket, et à gérer les reports staff.
+// Fondateur (rôle) ou propriétaire ou admin : peut supprimer un ticket et gérer les reports staff.
 function isAdmin(member) {
   if (!member?.guild) return false;
-  return member.id === member.guild.ownerId || !!member.permissions?.has(PermissionFlagsBits.Administrator);
+  return member.id === member.guild.ownerId
+    || !!member.permissions?.has(PermissionFlagsBits.Administrator)
+    || member.roles?.cache?.has(CONFIG.FONDATEUR_ROLE_ID);
 }
 
 // Qui peut gérer (fermer côté staff / rouvrir) ce ticket ?
 function isTicketStaff(member, ticket) {
   if (!member?.guild) return false;
-  if (ticket?.category === 'report_staff') return isAdmin(member); // report staff → admin uniquement
+  if (ticket?.category === 'report_staff') return isAdmin(member); // report staff → fondateurs / admins
   return isAdmin(member) || member.roles.cache.has(CONFIG.SECRETAIRE_ROLE_ID);
 }
 
@@ -658,7 +662,7 @@ async function fermerTicketDepart(guild, chId, ticket) {
   await channel.setParent(CONFIG.TICKET_FERME_CAT, { lockPermissions: false }).catch(() => {});
   const msg = ticket.msgId ? await channel.messages.fetch(ticket.msgId).catch(() => null) : null;
   if (msg) await msg.edit({ components: [ticketRowFerme()] }).catch(() => {});
-  const pingTarget = ticket.category === 'report_staff' ? `<@${guild.ownerId}>` : `<@&${CONFIG.SECRETAIRE_ROLE_ID}>`;
+  const pingTarget = ticket.category === 'report_staff' ? `<@&${CONFIG.FONDATEUR_ROLE_ID}>` : `<@&${CONFIG.SECRETAIRE_ROLE_ID}>`;
   await channel.send({
     content: pingTarget,
     embeds: [new EmbedBuilder().setColor(0xFAA61A).setDescription('🚪 L\'auteur du ticket a **quitté le serveur**. Le ticket est **fermé automatiquement** — un admin peut le supprimer.').setTimestamp()],
@@ -1660,9 +1664,11 @@ client.on('interactionCreate', async (interaction) => {
       { id: guild.roles.everyone, deny: [PermissionFlagsBits.ViewChannel] },
       { id: user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] },
     ];
-    // Report staff : aucun overwrite staff → seuls les ADMINS (permission Administrator,
-    // qui passe outre les overwrites) + l'auteur voient le salon. Confidentiel.
-    if (category !== 'report_staff') {
+    // Report staff : visible uniquement par les FONDATEURS + l'auteur (confidentiel).
+    // Autres catégories : visibles par les secrétaires.
+    if (category === 'report_staff') {
+      overwrites.push({ id: CONFIG.FONDATEUR_ROLE_ID, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.ManageChannels] });
+    } else {
       overwrites.push({ id: CONFIG.SECRETAIRE_ROLE_ID, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.ManageChannels] });
     }
 
@@ -1681,7 +1687,7 @@ client.on('interactionCreate', async (interaction) => {
       return;
     }
 
-    const pingTarget = category === 'report_staff' ? `<@${guild.ownerId}>` : `<@&${CONFIG.SECRETAIRE_ROLE_ID}>`;
+    const pingTarget = category === 'report_staff' ? `<@&${CONFIG.FONDATEUR_ROLE_ID}>` : `<@&${CONFIG.SECRETAIRE_ROLE_ID}>`;
     const welcome = await ch.send({
       content: `🎫 <@${user.id}> | ${pingTarget}`,
       embeds: [new EmbedBuilder()
