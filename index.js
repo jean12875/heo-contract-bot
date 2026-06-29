@@ -725,6 +725,19 @@ async function verifierInactivite() {
   }
 }
 
+// Annonce le changement d'étape au client, sous forme d'embed (ping dans le content).
+async function annoncerEtape(channel, info, etapeIndex, intro = '📢 Le contrat passe à l\'étape :') {
+  const etape = CONFIG.ETAPES[etapeIndex] || CONFIG.ETAPES[0];
+  await channel.send({
+    content: `<@${info.clientId}>`,
+    embeds: [new EmbedBuilder()
+      .setColor(etape.color)
+      .setDescription(`${intro} **${etape.label}**`)
+      .setFooter({ text: 'HEO Studio • Contrat' })
+      .setTimestamp()],
+  }).catch(() => {});
+}
+
 // Logique partagée par les boutons ◀️/➡️ ET les commandes /back et /next.
 // sens = 'next' ou 'back'. Gère perms, garde-fous, déplacement de catégorie,
 // archivage du salon dev si TERMINE, et mise à jour de l'embed du contrat.
@@ -787,17 +800,17 @@ async function changerEtape(interaction, sens) {
   const contractMsg = isButton ? interaction.message : await getContractMessage(channel, info);
   if (contractMsg) await contractMsg.edit({ embeds: [embed], components: [row] }).catch(() => {});
 
-  // Prévient le client de la nouvelle étape, directement dans son salon.
-  await channel.send({ content: `📢 <@${info.clientId}> — Le contrat passe à l'étape : **${CONFIG.ETAPES[cible].label}**` }).catch(() => {});
+  // Prévient le client de la nouvelle étape (embed), directement dans son salon.
+  await annoncerEtape(channel, info, cible);
   await logAction(interaction.guild, `➡️ Contrat **#${padNum(info.num)} — ${info.nom}** → **${CONFIG.ETAPES[cible].label}** (par <@${interaction.user.id}>)`, CONFIG.ETAPES[cible].color);
   updateDashboard(interaction.guild);
 
   if (!isButton) await interaction.editReply({ content: `✅ Étape : **${CONFIG.ETAPES[cible].label}**` });
 }
 
-// Force un contrat sur N'IMPORTE QUELLE étape (commande /etape), y compris Annulé (-1) ou Terminé.
-// Override staff : pas de ping client (c'est un outil de correction manuelle).
-async function appliquerEtapeForce(interaction, cible) {
+// Force un contrat sur N'IMPORTE QUELLE étape (commande /etape).
+// valeur : '0'..'4' (étapes), '-1' (annuler), 'desannuler'.
+async function appliquerEtapeForce(interaction, valeur) {
   if (!isStaffOrAdmin(interaction.member)) {
     await interaction.reply({ content: '❌ Réservé au staff.', ephemeral: true }); return;
   }
@@ -809,9 +822,40 @@ async function appliquerEtapeForce(interaction, cible) {
   const info = ticketInfos.get(channel.id);
   if (!info) { await interaction.editReply({ content: '⚠️ Ce salon n\'est pas un contrat reconnu par le bot.' }); return; }
 
+  const idxActuel = ticketEtapes.get(channel.id) ?? info.etapeIndex ?? 0;
+  const estAnnule = idxActuel === -1;
+
+  // ── Désannuler ───────────────────────────────────────────────────────────────
+  if (valeur === 'desannuler') {
+    if (!estAnnule) {
+      await interaction.editReply({ content: '⚠️ Ce contrat n\'est pas annulé — rien à désannuler.' }); return;
+    }
+    const retour = info.etapeAvantAnnulation ?? 0;
+    info.etapeIndex = retour;
+    ticketEtapes.set(channel.id, retour);
+    delete info.etapeAvantAnnulation;
+    saveTickets();
+    await channel.setParent(CONFIG.CATEGORIES[CONFIG.ETAPES[retour].id], { lockPermissions: false }).catch(() => {});
+    const devChannel = await getDevChannel(guild, info);
+    if (devChannel) await devChannel.setParent(CONFIG.CATEGORIES.DEV_CONTRAT, { lockPermissions: false }).catch(() => {});
+    const contractMsg = await getContractMessage(channel, info);
+    if (contractMsg) {
+      await contractMsg.edit({
+        embeds: [buildEmbed(info.num, info.nom, info.description, info.budget, info.delai, { id: info.clientId }, retour, prixLabel(info))],
+        components: [buildStaffRow(retour)],
+      }).catch(() => {});
+    }
+    await annoncerEtape(channel, info, retour, '↩️ Le contrat est réactivé — étape :');
+    await logAction(guild, `↩️ Contrat **#${padNum(info.num)} — ${info.nom}** désannulé par <@${interaction.user.id}> → **${CONFIG.ETAPES[retour].label}**`, CONFIG.ETAPES[retour].color);
+    updateDashboard(guild);
+    await interaction.editReply({ content: `✅ Contrat désannulé → **${CONFIG.ETAPES[retour].label}** (${channel}).` });
+    return;
+  }
+
+  const cible = parseInt(valeur, 10);
+
+  // ── Annuler ──────────────────────────────────────────────────────────────────
   if (cible === -1) {
-    // → Annulé
-    const idxActuel = ticketEtapes.get(channel.id) ?? info.etapeIndex ?? 0;
     if (idxActuel !== -1) info.etapeAvantAnnulation = idxActuel;
     info.etapeIndex = -1;
     ticketEtapes.set(channel.id, -1);
@@ -834,30 +878,39 @@ async function appliquerEtapeForce(interaction, cible) {
         .setTimestamp();
       await contractMsg.edit({ embeds: [annEmbed], components: [buildStaffRow(0, true)] }).catch(() => {});
     }
-  } else {
-    // → étape normale (0..4, y compris Terminé)
-    info.etapeIndex = cible;
-    ticketEtapes.set(channel.id, cible);
-    saveTickets();
-    await channel.setParent(CONFIG.CATEGORIES[CONFIG.ETAPES[cible].id], { lockPermissions: false }).catch(() => {});
-    const devChannel = await getDevChannel(guild, info);
-    if (devChannel) {
-      const devCat = CONFIG.ETAPES[cible].id === 'TERMINE' ? CONFIG.CATEGORIES.DEV_TERMINE : CONFIG.CATEGORIES.DEV_CONTRAT;
-      await devChannel.setParent(devCat, { lockPermissions: false }).catch(() => {});
-    }
-    const contractMsg = await getContractMessage(channel, info);
-    if (contractMsg) {
-      await contractMsg.edit({
-        embeds: [buildEmbed(info.num, info.nom, info.description, info.budget, info.delai, { id: info.clientId }, cible, prixLabel(info))],
-        components: [buildStaffRow(cible)],
-      }).catch(() => {});
-    }
+    await channel.send({ embeds: [new EmbedBuilder().setColor(0xED4245).setDescription(`❌ Contrat **annulé** par <@${interaction.user.id}>`).setTimestamp()] }).catch(() => {});
+    await logAction(guild, `🎯 Contrat **#${padNum(info.num)} — ${info.nom}** annulé (/etape) par <@${interaction.user.id}>`, 0xED4245);
+    updateDashboard(guild);
+    await interaction.editReply({ content: `✅ Contrat positionné sur **❌ Annulé** (${channel}).` });
+    return;
   }
 
-  const labelCible = cible === -1 ? '❌ Annulé' : CONFIG.ETAPES[cible].label;
-  await logAction(guild, `🎯 Contrat **#${padNum(info.num)} — ${info.nom}** forcé sur **${labelCible}** par <@${interaction.user.id}>`, cible === -1 ? 0xED4245 : CONFIG.ETAPES[cible].color);
+  // ── Étape normale (0..4) ────────────────────────────────────────────────────
+  // Interdit de déplacer un contrat annulé directement : il faut le désannuler d'abord.
+  if (estAnnule) {
+    await interaction.editReply({ content: '❌ Ce contrat est **annulé**. Utilise d\'abord l\'option **↩️ Désannuler** avant de le déplacer vers une autre étape.' });
+    return;
+  }
+  info.etapeIndex = cible;
+  ticketEtapes.set(channel.id, cible);
+  saveTickets();
+  await channel.setParent(CONFIG.CATEGORIES[CONFIG.ETAPES[cible].id], { lockPermissions: false }).catch(() => {});
+  const devChannel = await getDevChannel(guild, info);
+  if (devChannel) {
+    const devCat = CONFIG.ETAPES[cible].id === 'TERMINE' ? CONFIG.CATEGORIES.DEV_TERMINE : CONFIG.CATEGORIES.DEV_CONTRAT;
+    await devChannel.setParent(devCat, { lockPermissions: false }).catch(() => {});
+  }
+  const contractMsg = await getContractMessage(channel, info);
+  if (contractMsg) {
+    await contractMsg.edit({
+      embeds: [buildEmbed(info.num, info.nom, info.description, info.budget, info.delai, { id: info.clientId }, cible, prixLabel(info))],
+      components: [buildStaffRow(cible)],
+    }).catch(() => {});
+  }
+  await annoncerEtape(channel, info, cible);
+  await logAction(guild, `🎯 Contrat **#${padNum(info.num)} — ${info.nom}** forcé sur **${CONFIG.ETAPES[cible].label}** par <@${interaction.user.id}>`, CONFIG.ETAPES[cible].color);
   updateDashboard(guild);
-  await interaction.editReply({ content: `✅ Contrat positionné sur **${labelCible}** (${channel}).` });
+  await interaction.editReply({ content: `✅ Contrat positionné sur **${CONFIG.ETAPES[cible].label}** (${channel}).` });
 }
 
 // ─── READY ────────────────────────────────────────────────────────────────────
@@ -995,7 +1048,8 @@ async function registerSlashCommands() {
             { name: '🛠️ En développement',        value: '2' },
             { name: '2️⃣ Attente 2e paiement',    value: '3' },
             { name: '✅ Terminé',                 value: '4' },
-            { name: '❌ Annulé',                  value: '-1' },
+            { name: '❌ Annuler',                 value: '-1' },
+            { name: '↩️ Désannuler',              value: 'desannuler' },
           )
       )
       .addStringOption(opt =>
@@ -1150,8 +1204,7 @@ client.on('interactionCreate', async (interaction) => {
 
   // ── /etape : force le contrat sur n'importe quelle étape (staff) ──────────────
   if (interaction.isChatInputCommand() && interaction.commandName === 'etape') {
-    const cible = parseInt(interaction.options.getString('etape'), 10);
-    await appliquerEtapeForce(interaction, cible);
+    await appliquerEtapeForce(interaction, interaction.options.getString('etape'));
     return;
   }
 
