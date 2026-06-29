@@ -1525,15 +1525,20 @@ client.on('interactionCreate', async (interaction) => {
     const num = ticketChannel.id;
     // Renommage en `contrat-<id>` avec 3 tentatives (délai croissant). En cas d'échec
     // définitif, on l'enregistre dans /debug pour diagnostiquer (le nom reste cosmétique).
+    const nomVoulu = `contrat-${num}`;
     let renomme = false;
     for (let essai = 1; essai <= 3 && !renomme; essai++) {
       try {
-        await ticketChannel.setName(`contrat-${num}`);
+        await ticketChannel.setName(nomVoulu);
         renomme = true;
       } catch (e) {
-        if (essai === 3) logError('rename contrat', e);
+        if (essai === 3) logError('rename contrat (erreur API)', e);
         else await new Promise(r => setTimeout(r, essai * 2000));
       }
+    }
+    // Vérifie que le nom a RÉELLEMENT été appliqué (capture le cas « réussi mais nom inchangé »).
+    if (ticketChannel.name !== nomVoulu) {
+      logError('rename contrat (nom non appliqué)', `nom actuel="${ticketChannel.name}" attendu="${nomVoulu}" — vérifie la permission « Gérer les salons » du bot sur la catégorie Négociation.`);
     }
 
     ticketEtapes.set(ticketChannel.id, 0);
