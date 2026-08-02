@@ -2423,7 +2423,18 @@ client.on('interactionCreate', async (interaction) => {
   }
 
  } catch (err) {
-    logError('interactionCreate', err);
+    // Contexte détaillé pour /debug : on veut savoir QUELLE interaction a planté.
+    let ctx = 'interactionCreate';
+    try {
+      const parts = [];
+      if (interaction.isChatInputCommand?.()) parts.push(`cmd=/${interaction.commandName}`);
+      if (interaction.isButton?.())           parts.push(`bouton=${interaction.customId}`);
+      if (interaction.isAnySelectMenu?.())     parts.push(`menu=${interaction.customId}=${(interaction.values || []).join(',')}`);
+      if (interaction.isModalSubmit?.())       parts.push(`modal=${interaction.customId}`);
+      if (interaction.channelId)               parts.push(`salon=${interaction.channelId}`);
+      if (parts.length) ctx += ' [' + parts.join(' | ') + ']';
+    } catch { /* pas grave */ }
+    logError(ctx, err);
     await safeErrorReply(interaction);
   }
 });
