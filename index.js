@@ -407,19 +407,23 @@ async function logTicket(guild, description, color = 0x5865F2, channelId = CONFI
   } catch (e) { logError('logTicket', e); }
 }
 
-// Vérifie qu'une catégorie parente existe ENCORE sur le serveur. Si son ID est périmé
-// (catégorie supprimée ou recréée → nouvel ID), on log un message clair dans /debug
-// et on renvoie undefined : le salon sera alors créé SANS catégorie (visible à la racine)
-// au lieu de faire planter toute la création. Ça évite le « salon dans un endroit
-// inexistant » et indique exactement quel ID corriger dans CONFIG.
-async function parentSur(guild, catId, label) {
-  if (!catId) return undefined;
-  const cat = guild.channels.cache.get(catId) || await guild.channels.fetch(catId).catch(() => null);
-  if (!cat) {
-    logError('catégorie introuvable', `La catégorie « ${label} » (ID ${catId}) n'existe plus sur le serveur — le salon sera créé sans catégorie. Corrige cet ID dans CONFIG.`);
-    return undefined;
+// Crée un salon en tolérant une catégorie parente périmée. Le cache de discord.js peut
+// contenir une catégorie DÉJÀ supprimée sur Discord (ex. supprimée pendant que le bot
+// dormait) : dans ce cas `channels.create({ parent })` renvoie 10003 Unknown Channel et
+// le salon n'est jamais créé. Ici, si la création échoue et qu'un parent était demandé,
+// on réessaie SANS catégorie (salon créé à la racine, visible) et on log dans /debug
+// exactement quelle catégorie corriger. Le salon est ainsi TOUJOURS créé.
+async function creerSalon(guild, options, labelCat) {
+  try {
+    return await guild.channels.create(options);
+  } catch (e) {
+    if (options.parent) {
+      logError('création salon (catégorie périmée)',
+        `Catégorie « ${labelCat} » (ID ${options.parent}) invalide ou supprimée sur Discord — salon créé SANS catégorie. Corrige cet ID dans CONFIG (clic droit sur la vraie catégorie → Copier l'identifiant). Détail API : ${e.message}`);
+      return await guild.channels.create({ ...options, parent: undefined });
+    }
+    throw e;
   }
-  return catId;
 }
 
 // Rangée du panneau (menu déroulant des catégories). Reconstruite à chaque fois
@@ -1390,10 +1394,10 @@ client.on('interactionCreate', async (interaction) => {
 
       await interaction.editReply({ content: `✅ Salon ${devChannel} mis à jour avec ${devUsers.length} dev(s).` });
     } else {
-      devChannel = await guild.channels.create({
+      devChannel = await creerSalon(guild, {
         name: devChannelName,
         type: ChannelType.GuildText,
-        parent: await parentSur(guild, CONFIG.CATEGORIES.DEV_CONTRAT, 'Dev Contrat'),
+        parent: CONFIG.CATEGORIES.DEV_CONTRAT,
         permissionOverwrites: [
           { id: guild.roles.everyone,      deny:  [PermissionFlagsBits.ViewChannel] },
           { id: CONFIG.STAFF_ROLE_ID,      allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.ManageChannels] },
@@ -1403,7 +1407,7 @@ client.on('interactionCreate', async (interaction) => {
             allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory],
           })),
         ],
-      });
+      }, 'Dev Contrat');
       await devChannel.send({
         content: devUsers.map(u => `<@${u.id}>`).join(' '),
         embeds: [new EmbedBuilder()
@@ -1523,17 +1527,17 @@ client.on('interactionCreate', async (interaction) => {
       saveTickets();
     }
 
-    const ticketChannel = await guild.channels.create({
+    const ticketChannel = await creerSalon(guild, {
       name: 'contrat',
       type: ChannelType.GuildText,
-      parent: await parentSur(guild, CONFIG.CATEGORIES.NEGOCIATION, 'Négociation'),
+      parent: CONFIG.CATEGORIES.NEGOCIATION,
       permissionOverwrites: [
         { id: guild.roles.everyone,      deny:  [PermissionFlagsBits.ViewChannel] },
         { id: user.id,                   allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] },
         { id: CONFIG.STAFF_ROLE_ID,      allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.ManageChannels] },
         { id: CONFIG.SECRETAIRE_ROLE_ID, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.ManageChannels] },
       ],
-    });
+    }, 'Négociation');
 
     // L'identifiant du contrat = l'ID Discord du salon (unique, plus de numéro à 4 chiffres).
     // Le bot ne connaît l'ID qu'après la création, d'où le renommage ici.
@@ -1846,12 +1850,12 @@ client.on('interactionCreate', async (interaction) => {
     const slug = user.username.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 20) || 'membre';
     let ch;
     try {
-      ch = await guild.channels.create({
+      ch = await creerSalon(guild, {
         name: `${category.replace(/_/g, '-')}-${slug}`,
         type: ChannelType.GuildText,
-        parent: await parentSur(guild, conf.cat, conf.label),
+        parent: conf.cat,
         permissionOverwrites: overwrites,
-      });
+      }, conf.label);
     } catch (e) {
       logError('création ticket', e);
       await interaction.editReply({ content: '❌ Impossible de créer le salon (catégorie pleine ou permissions manquantes). Préviens un admin.' });
@@ -2035,17 +2039,17 @@ client.on('interactionCreate', async (interaction) => {
       }
     }
 
-    const ticketChannel = await guild.channels.create({
+    const ticketChannel = await creerSalon(guild, {
       name: `recrut-${user.username.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 20)}`,
       type: ChannelType.GuildText,
-      parent: await parentSur(guild, CONFIG.RECRUTEMENT_CATEGORY_ID, 'Recrutement'),
+      parent: CONFIG.RECRUTEMENT_CATEGORY_ID,
       permissionOverwrites: [
         { id: guild.roles.everyone,  deny:  [PermissionFlagsBits.ViewChannel] },
         { id: user.id,               allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] },
         { id: CONFIG.STAFF_ROLE_ID,  allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.ManageChannels] },
         { id: CONFIG.SECRETAIRE_ROLE_ID, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.ManageChannels] },
       ],
-    });
+    }, 'Recrutement');
 
     // Mémorise le candidat dès l'ouverture (plus besoin de relire l'embed plus tard).
     recruitInfos.set(ticketChannel.id, { candidateId: user.id, typeDev, disponibilite, paiement });
