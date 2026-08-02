@@ -407,6 +407,21 @@ async function logTicket(guild, description, color = 0x5865F2, channelId = CONFI
   } catch (e) { logError('logTicket', e); }
 }
 
+// Vérifie qu'une catégorie parente existe ENCORE sur le serveur. Si son ID est périmé
+// (catégorie supprimée ou recréée → nouvel ID), on log un message clair dans /debug
+// et on renvoie undefined : le salon sera alors créé SANS catégorie (visible à la racine)
+// au lieu de faire planter toute la création. Ça évite le « salon dans un endroit
+// inexistant » et indique exactement quel ID corriger dans CONFIG.
+async function parentSur(guild, catId, label) {
+  if (!catId) return undefined;
+  const cat = guild.channels.cache.get(catId) || await guild.channels.fetch(catId).catch(() => null);
+  if (!cat) {
+    logError('catégorie introuvable', `La catégorie « ${label} » (ID ${catId}) n'existe plus sur le serveur — le salon sera créé sans catégorie. Corrige cet ID dans CONFIG.`);
+    return undefined;
+  }
+  return catId;
+}
+
 // Rangée du panneau (menu déroulant des catégories). Reconstruite à chaque fois
 // pour pouvoir réinitialiser le menu après une sélection.
 function panneauTicketRow() {
@@ -1378,7 +1393,7 @@ client.on('interactionCreate', async (interaction) => {
       devChannel = await guild.channels.create({
         name: devChannelName,
         type: ChannelType.GuildText,
-        parent: CONFIG.CATEGORIES.DEV_CONTRAT,
+        parent: await parentSur(guild, CONFIG.CATEGORIES.DEV_CONTRAT, 'Dev Contrat'),
         permissionOverwrites: [
           { id: guild.roles.everyone,      deny:  [PermissionFlagsBits.ViewChannel] },
           { id: CONFIG.STAFF_ROLE_ID,      allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.ManageChannels] },
@@ -1511,7 +1526,7 @@ client.on('interactionCreate', async (interaction) => {
     const ticketChannel = await guild.channels.create({
       name: 'contrat',
       type: ChannelType.GuildText,
-      parent: CONFIG.CATEGORIES.NEGOCIATION,
+      parent: await parentSur(guild, CONFIG.CATEGORIES.NEGOCIATION, 'Négociation'),
       permissionOverwrites: [
         { id: guild.roles.everyone,      deny:  [PermissionFlagsBits.ViewChannel] },
         { id: user.id,                   allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] },
@@ -1834,7 +1849,7 @@ client.on('interactionCreate', async (interaction) => {
       ch = await guild.channels.create({
         name: `${category.replace(/_/g, '-')}-${slug}`,
         type: ChannelType.GuildText,
-        parent: conf.cat,
+        parent: await parentSur(guild, conf.cat, conf.label),
         permissionOverwrites: overwrites,
       });
     } catch (e) {
@@ -2023,7 +2038,7 @@ client.on('interactionCreate', async (interaction) => {
     const ticketChannel = await guild.channels.create({
       name: `recrut-${user.username.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 20)}`,
       type: ChannelType.GuildText,
-      parent: CONFIG.RECRUTEMENT_CATEGORY_ID,
+      parent: await parentSur(guild, CONFIG.RECRUTEMENT_CATEGORY_ID, 'Recrutement'),
       permissionOverwrites: [
         { id: guild.roles.everyone,  deny:  [PermissionFlagsBits.ViewChannel] },
         { id: user.id,               allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] },
