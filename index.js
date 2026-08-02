@@ -1542,7 +1542,8 @@ client.on('interactionCreate', async (interaction) => {
     }
 
     ticketEtapes.set(ticketChannel.id, 0);
-    ticketInfos.set(ticketChannel.id, { num, nom: nomProjet, description, budget, delai, clientId: user.id, etapeIndex: 0 });
+    const infoContrat = { num, nom: nomProjet, description, budget, delai, clientId: user.id, etapeIndex: 0 };
+    ticketInfos.set(ticketChannel.id, infoContrat);
 
     const contractMsg = await ticketChannel.send({
       content: `👋 <@${user.id}> | <@&${CONFIG.SECRETAIRE_ROLE_ID}>`,
@@ -1550,7 +1551,10 @@ client.on('interactionCreate', async (interaction) => {
       components: [buildStaffRow(0)],
     });
 
-    ticketInfos.get(ticketChannel.id).messageId = contractMsg.id;
+    // On mute l'objet directement (même référence que dans la Map) au lieu de refaire un .get()
+    // qui pouvait renvoyer undefined si l'entrée avait bougé pendant l'await → crash "messageId".
+    infoContrat.messageId = contractMsg.id;
+    ticketInfos.set(ticketChannel.id, infoContrat);
     saveTickets();
 
     await ticketChannel.send({ content: CONFIG.SECURITY_MESSAGE });
