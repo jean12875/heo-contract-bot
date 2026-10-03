@@ -59,6 +59,24 @@ process.on('uncaughtException', (err) => logError('uncaughtException', err));
 client.on('error', (err) => logError('client Discord', err));
 client.on('shardError', (err) => logError('shard Discord', err));
 
+// ─── AUTO-GUÉRISON DE LA CONNEXION ──────────────────────────────────────────
+// Après une coupure Discord (ex. incident Gateway 502/503), discord.js peut rester
+// « zombie » : connecté en apparence mais session morte → il reçoit les commandes mais
+// répond trop tard (10062 Unknown interaction). On surveille la connexion et, si elle
+// devient irrécupérable, on termine le process : Render le relance aussitôt avec une
+// connexion neuve. Bien plus fiable qu'un redémarrage manuel.
+client.on('shardDisconnect', (event, id) => {
+  logError('shardDisconnect', `shard ${id} déconnecté (code ${event?.code}). Reconnexion…`);
+});
+client.on('shardReconnecting', (id) => console.log(`🔄 Shard ${id} : reconnexion en cours…`));
+client.on('shardResume', (id) => console.log(`✅ Shard ${id} : session reprise.`));
+client.on('shardReady', (id) => console.log(`✅ Shard ${id} : prêt.`));
+// Session définitivement invalidée par Discord : impossible de reprendre → on redémarre.
+client.on('invalidated', () => {
+  logError('session invalidée', 'La session Discord est invalidée (irrécupérable). Redémarrage du process.');
+  setTimeout(() => process.exit(1), 1000);
+});
+
 // ─── CONFIG ───────────────────────────────────────────────────────────────────
 const CONFIG = {
   TOKEN:              process.env.TOKEN,
@@ -2443,4 +2461,27 @@ client.on('interactionCreate', async (interaction) => {
   }
 });
 
-client.login(CONFIG.TOKEN);
+// ─── CONNEXION AVEC RÉESSAI + GARDE-FOU ─────────────────────────────────────
+// Garde-fou : si le bot n'est pas devenu « prêt » dans les 90 s (connexion bloquée),
+// on termine le process pour que Render relance une tentative propre.
+let estPret = false;
+client.once('ready', () => { estPret = true; });
+setTimeout(() => {
+  if (!estPret) {
+    logError('démarrage bloqué', 'Toujours pas connecté après 90 s — redémarrage du process.');
+    process.exit(1);
+  }
+}, 90 * 1000);
+
+// Connexion avec réessai (jusqu'à 5 fois) au lieu d'un login unique non protégé.
+async function connecter(essai = 1) {
+  try {
+    await client.login(CONFIG.TOKEN);
+  } catch (e) {
+    logError(`login (tentative ${essai})`, e);
+    if (essai >= 5) { process.exit(1); return; }
+    await new Promise(r => setTimeout(r, essai * 5000));
+    return connecter(essai + 1);
+  }
+}
+connecter();
