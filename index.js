@@ -1574,8 +1574,16 @@ client.on('interactionCreate', async (interaction) => {
       }
     }
     // Vérifie que le nom a RÉELLEMENT été appliqué (capture le cas « réussi mais nom inchangé »).
+    // Si ça n'a pas pris (souvent la limite Discord de 2 renommages / 10 min au moment de la
+    // création), on poste un petit bouton 🏷️ : un clic un peu plus tard force le nom.
     if (ticketChannel.name !== nomVoulu) {
       logError('rename contrat (nom non appliqué)', `nom actuel="${ticketChannel.name}" attendu="${nomVoulu}" — vérifie la permission « Gérer les salons » du bot sur la catégorie Négociation.`);
+      await ticketChannel.send({
+        content: '🏷️ Le nom du salon n\'a pas pu être appliqué automatiquement. Clique pour forcer :',
+        components: [new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId('forcer_nom').setLabel('🏷️ Forcer le nom').setStyle(ButtonStyle.Secondary)
+        )],
+      }).catch(() => {});
     }
 
     ticketEtapes.set(ticketChannel.id, 0);
@@ -1601,6 +1609,25 @@ client.on('interactionCreate', async (interaction) => {
     await interaction.editReply({ content: `✅ Ton ticket a été créé : ${ticketChannel}` });
     } finally {
       enCreationContrat.delete(user.id);
+    }
+    return;
+  }
+
+  // ── Forcer le nom du salon (contrat-<id>) ────────────────────────────────────
+  if (interaction.isButton() && interaction.customId === 'forcer_nom') {
+    if (!isStaffOrAdmin(interaction.member)) {
+      await interaction.reply({ content: '❌ Réservé au staff.', ephemeral: true }); return;
+    }
+    await interaction.deferReply({ ephemeral: true });
+    const ch = interaction.channel;
+    const nomVoulu = `contrat-${ch.id}`;
+    try {
+      await ch.setName(nomVoulu);
+      await interaction.editReply({ content: `✅ Nom appliqué : **${nomVoulu}**` });
+      await interaction.message.delete().catch(() => {}); // retire le petit message du bouton
+    } catch (e) {
+      logError('forcer_nom', e);
+      await interaction.editReply({ content: `❌ Échec : ${e.message}\n\nSouvent c'est la limite Discord de **2 renommages / 10 min** (réessaie dans quelques minutes), ou la permission **« Gérer les salons »** du bot sur la catégorie Négociation.` });
     }
     return;
   }
